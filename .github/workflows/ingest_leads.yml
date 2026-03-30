@@ -25,8 +25,11 @@ jobs:
         continue-on-error: true
         run: python scripts/hcad_download.py
 
-      - name: Pull Houston permits
+      - name: Pull Houston permits and match to leads
         run: python scripts/permit_pull.py
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
 
       - name: Join and score leads
         if: steps.hcad.outcome == 'success'
