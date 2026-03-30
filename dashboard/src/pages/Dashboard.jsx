@@ -7,6 +7,8 @@ import LeadTable from "../components/LeadTable";
 const DEFAULT_FILTERS = {
   status: "",
   minScore: "",
+  yearFrom: "",
+  yearTo: "",
   permitOnly: false,
   outOfStateOnly: false,
 };
@@ -45,6 +47,10 @@ export default function Dashboard({ onLogout, onUpload }) {
   const filteredLeads = allLeads.filter((lead) => {
     if (filters.status && lead.status !== filters.status) return false;
     if (filters.minScore && lead.lead_score < Number(filters.minScore))
+      return false;
+    if (filters.yearFrom && lead.year_built < Number(filters.yearFrom))
+      return false;
+    if (filters.yearTo && lead.year_built > Number(filters.yearTo))
       return false;
     if (filters.permitOnly && !lead.permit_flag) return false;
     if (filters.outOfStateOnly && !lead.out_of_state_owner) return false;

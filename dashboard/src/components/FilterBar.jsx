@@ -44,6 +44,34 @@ export default function FilterBar({ filters, onChange }) {
           placeholder="0"
         />
       </div>
+      <div>
+        <label className="block text-xs font-medium text-gray-500 mb-1">
+          Year Built From
+        </label>
+        <input
+          type="number"
+          min={1900}
+          max={2030}
+          value={filters.yearFrom}
+          onChange={(e) => update("yearFrom", e.target.value)}
+          className="border border-gray-300 rounded-md px-3 py-2 text-sm w-24 focus:outline-none focus:ring-1 focus:ring-blue-500"
+          placeholder="1980"
+        />
+      </div>
+      <div>
+        <label className="block text-xs font-medium text-gray-500 mb-1">
+          Year Built To
+        </label>
+        <input
+          type="number"
+          min={1900}
+          max={2030}
+          value={filters.yearTo}
+          onChange={(e) => update("yearTo", e.target.value)}
+          className="border border-gray-300 rounded-md px-3 py-2 text-sm w-24 focus:outline-none focus:ring-1 focus:ring-blue-500"
+          placeholder="2005"
+        />
+      </div>
       <div className="flex items-center gap-4 py-2">
         <label className="flex items-center gap-1.5 text-sm text-gray-700 cursor-pointer">
           <input
