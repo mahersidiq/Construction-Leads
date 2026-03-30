@@ -1,6 +1,6 @@
 import { useState } from "react";
 
-const VITE_PASSWORD = import.meta.env.VITE_PASSWORD;
+const APP_PASSWORD = import.meta.env.VITE_APP_PASSWORD;
 
 export default function Login({ onLogin }) {
   const [password, setPassword] = useState("");
@@ -8,7 +8,7 @@ export default function Login({ onLogin }) {
 
   const handleSubmit = (e) => {
     e.preventDefault();
-    if (password === VITE_PASSWORD) {
+    if (password === APP_PASSWORD) {
       onLogin();
     } else {
       setError("Invalid password");
