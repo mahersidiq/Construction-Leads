@@ -11,7 +11,7 @@ const DEFAULT_FILTERS = {
   outOfStateOnly: false,
 };
 
-export default function Dashboard({ onLogout }) {
+export default function Dashboard({ onLogout, onUpload }) {
   const [allLeads, setAllLeads] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -61,12 +61,22 @@ export default function Dashboard({ onLogout }) {
             </h1>
             <p className="text-xs text-gray-500">Saadi Construction Group</p>
           </div>
-          <button
-            onClick={onLogout}
-            className="text-sm text-gray-500 hover:text-gray-700 transition-colors"
-          >
-            Sign Out
-          </button>
+          <div className="flex items-center gap-4">
+            {onUpload && (
+              <button
+                onClick={onUpload}
+                className="text-sm text-blue-600 hover:text-blue-800 transition-colors font-medium"
+              >
+                Upload Data
+              </button>
+            )}
+            <button
+              onClick={onLogout}
+              className="text-sm text-gray-500 hover:text-gray-700 transition-colors"
+            >
+              Sign Out
+            </button>
+          </div>
         </div>
       </header>
 
