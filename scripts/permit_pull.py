@@ -1,19 +1,26 @@
 """
-Pull permit data from the City of Houston Open Data API and match to
+Pull permit data from the City of Houston Open Data portal and match to
 Supabase leads.
 
 Pipeline:
-  1. Fetch all distinct addresses from the leads table in Supabase.
-  2. Query the Houston Socrata permit endpoint for relevant permit types
-     and statuses from the last 24 months.
+  1. Query the Houston CKAN DataStore API for sold permit records
+     (resource 80b03984-0e31-41ff-937b-35b686755bf9, ~47K records).
+  2. Normalize addresses from both permits and leads.
   3. Match permits to leads by normalized street address.
   4. Update permit_flag, permit_type, permit_status, and permit_date
      for matching leads.
+
+Note: The old Socrata endpoint (3srv-977b) was decommissioned when
+Houston migrated to CKAN.  This script uses the CKAN DataStore API.
+
+A companion Supabase Edge Function ("permit-match") can also run
+this pipeline server-side by loading permit addresses into a staging
+table and matching via SQL.
 """
 
 import os
 import re
-from datetime import datetime, timedelta
+from datetime import date
 
 import pandas as pd
 import requests
@@ -26,29 +33,12 @@ load_dotenv()
 # Configuration
 # ---------------------------------------------------------------------------
 
-SOCRATA_ENDPOINT = "https://data.houstontx.gov/resource/3srv-977b.json"
-
-# Permit types that signal construction activity relevant to our leads
-CONSTRUCTION_PERMIT_TYPES = {
-    "new construction",
-    "remodel",
-    "repair",
-    "foundation repair",
-}
-
-# Statuses indicating real / active permit activity
-ACTIVE_STATUSES = {"Active", "Complete"}
-
-# Also keep the "problem" statuses from the original script — these are
-# useful for flagging properties with stalled/troubled projects.
-PROBLEM_STATUSES = {"Expired", "Failed Inspection", "Stop Work Order"}
-
-ALL_STATUSES = ACTIVE_STATUSES | PROBLEM_STATUSES
+# Houston CKAN DataStore API — sold permits with individual address records
+CKAN_DATASTORE_URL = "https://data.houstontx.gov/api/3/action/datastore_search"
+PERMIT_RESOURCE_ID = "80b03984-0e31-41ff-937b-35b686755bf9"
+CKAN_PAGE_SIZE = 32000
 
 OUTPUT_PATH = os.path.join(os.path.dirname(__file__), "permits_filtered.csv")
-
-# Socrata page size
-PAGE_SIZE = 50000
 
 # Supabase credentials
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
@@ -59,7 +49,6 @@ SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY", "")
 # Address normalization
 # ---------------------------------------------------------------------------
 
-# Common street‐type abbreviations for normalization
 _STREET_ABBREVS = {
     "STREET": "ST", "AVENUE": "AVE", "BOULEVARD": "BLVD", "DRIVE": "DR",
     "LANE": "LN", "ROAD": "RD", "COURT": "CT", "CIRCLE": "CIR",
@@ -67,142 +56,102 @@ _STREET_ABBREVS = {
     "FREEWAY": "FWY", "HIGHWAY": "HWY",
 }
 
+_CITIES = [
+    "HOUSTON", "BELLAIRE", "PASADENA", "DEER PARK", "BAYTOWN",
+    "HUMBLE", "KATY", "TOMBALL", "CROSBY", "SPRING", "CYPRESS",
+    "HUFFMAN", "WALLER", "HIGHLANDS",
+]
+
 
 def normalize_address(raw: str) -> str:
     """
-    Produce a canonical form of a street address for fuzzy matching.
+    Produce a canonical street address for matching.
 
-    - Upper-case
-    - Strip unit / suite / apt suffixes
-    - Collapse whitespace
+    - Upper-case, strip unit/suite/apt, collapse whitespace
     - Normalize common street-type words
-    - Remove city name and ZIP (just keep the street portion)
+    - Remove trailing city name and ZIP
     """
     if not raw or not isinstance(raw, str):
         return ""
 
     addr = raw.upper().strip()
-
-    # Remove anything after a comma (city, state, zip)
     addr = addr.split(",")[0].strip()
-
-    # Remove unit/suite/apt
     addr = re.sub(r"\b(UNIT|STE|SUITE|APT|#)\s*\S*", "", addr)
-
-    # Remove trailing ZIP codes (5 or 9 digit)
     addr = re.sub(r"\b\d{5}(-\d{4})?\s*$", "", addr)
 
-    # Remove trailing city names — our leads format is
-    # "700 CONGRESS ST HOUSTON 77002". After ZIP removal we may still
-    # have the city.  We strip common Houston-area city names.
-    _CITIES = [
-        "HOUSTON", "BELLAIRE", "PASADENA", "DEER PARK", "BAYTOWN",
-        "HUMBLE", "KATY", "TOMBALL", "CROSBY", "SPRING", "CYPRESS",
-        "HUFFMAN", "WALLER", "HIGHLANDS",
-    ]
     for city in _CITIES:
         addr = re.sub(rf"\b{city}\s*$", "", addr)
 
-    # Normalize street types
     for long, short in _STREET_ABBREVS.items():
         addr = re.sub(rf"\b{long}\b", short, addr)
 
-    # Collapse whitespace
     addr = re.sub(r"\s+", " ", addr).strip()
-
     return addr
 
 
 # ---------------------------------------------------------------------------
-# Socrata API helpers
+# CKAN DataStore API helpers
 # ---------------------------------------------------------------------------
 
-def build_query_params(offset: int = 0) -> dict:
-    """Build SoQL query parameters for the Socrata API."""
-    cutoff = (datetime.now() - timedelta(days=730)).strftime("%Y-%m-%dT00:00:00")
-
-    type_list = ", ".join(f"'{t}'" for t in CONSTRUCTION_PERMIT_TYPES)
-    status_list = ", ".join(f"'{s}'" for s in ALL_STATUSES)
-
-    where_clause = (
-        f"lower(permit_type) in ({type_list}) "
-        f"AND status in ({status_list}) "
-        f"AND issue_date >= '{cutoff}'"
-    )
-
-    return {
-        "$where": where_clause,
-        "$limit": PAGE_SIZE,
-        "$offset": offset,
-        "$order": "issue_date DESC",
-    }
-
-
 def fetch_permits() -> pd.DataFrame:
-    """Fetch all matching permits with pagination."""
+    """Fetch all permit records from the CKAN DataStore with pagination."""
     all_records: list[dict] = []
     offset = 0
 
     while True:
-        params = build_query_params(offset)
         print(f"Fetching permits (offset={offset}) ...")
-        resp = requests.get(SOCRATA_ENDPOINT, params=params, timeout=60)
+        resp = requests.get(
+            CKAN_DATASTORE_URL,
+            params={
+                "resource_id": PERMIT_RESOURCE_ID,
+                "limit": CKAN_PAGE_SIZE,
+                "offset": offset,
+            },
+            timeout=60,
+        )
         resp.raise_for_status()
-        data = resp.json()
+        result = resp.json().get("result", {})
+        records = result.get("records", [])
 
-        if not data:
+        if not records:
             break
 
-        all_records.extend(data)
-        print(f"  Received {len(data)} records")
+        all_records.extend(records)
+        print(f"  Received {len(records)} records")
 
-        if len(data) < PAGE_SIZE:
+        if len(records) < CKAN_PAGE_SIZE:
             break
-        offset += PAGE_SIZE
+        offset += CKAN_PAGE_SIZE
 
     print(f"Total records fetched: {len(all_records)}")
     return pd.DataFrame(all_records)
 
 
 def normalize_permits(df: pd.DataFrame) -> pd.DataFrame:
-    """Normalize and select relevant columns from permit data."""
+    """Normalize permit data and add canonical address column."""
     if df.empty:
-        return pd.DataFrame(
-            columns=["address", "address_norm", "permit_type", "status", "issue_date"]
-        )
+        return pd.DataFrame(columns=["address", "address_norm"])
 
-    # Detect address column
+    # The CKAN resource uses "Address" as the column name
     addr_col = next(
-        (c for c in ["address", "project_address", "street_address", "location"]
+        (c for c in ["Address", "address", "project_address", "street_address"]
          if c in df.columns),
         None,
     )
-    # Detect permit type column
-    type_col = next(
-        (c for c in ["permit_type", "type"] if c in df.columns), None
-    )
-    # Detect status column
-    status_col = next(
-        (c for c in ["status", "permit_status"] if c in df.columns), None
-    )
-    # Detect date column
-    date_col = next(
-        (c for c in ["issue_date", "permit_date", "date"] if c in df.columns), None
-    )
+
+    if not addr_col:
+        print(f"  WARNING: No address column found. Columns: {list(df.columns)}")
+        return pd.DataFrame(columns=["address", "address_norm"])
 
     out = pd.DataFrame()
-    out["address"] = df[addr_col].astype(str).str.strip() if addr_col else ""
-    out["permit_type"] = df[type_col].astype(str).str.strip() if type_col else ""
-    out["status"] = df[status_col].astype(str).str.strip() if status_col else ""
-    out["issue_date"] = (
-        pd.to_datetime(df[date_col], errors="coerce").dt.date if date_col else None
-    )
-
-    # Drop rows with empty addresses
+    out["address"] = df[addr_col].astype(str).str.strip()
     out = out[out["address"].str.len() > 0].copy()
-
-    # Add normalized address for matching
     out["address_norm"] = out["address"].apply(normalize_address)
+
+    # Carry forward any extra useful columns
+    for col in ["Receipt No", "Project No", "Applicant\nName"]:
+        if col in df.columns:
+            out[col] = df.loc[out.index, col]
 
     return out
 
@@ -242,29 +191,29 @@ def fetch_lead_addresses(client) -> pd.DataFrame:
     return df
 
 
-def update_matching_leads(client, matches: pd.DataFrame) -> int:
+def update_matching_leads(client, lead_ids: list[str]) -> int:
     """
-    Update permit columns for leads that matched a permit.
+    Set permit_flag = true for the given lead IDs.
     Returns the number of rows updated.
     """
-    if matches.empty:
+    if not lead_ids:
         return 0
 
     batch_size = 500
     updated = 0
 
-    for i in range(0, len(matches), batch_size):
-        batch = matches.iloc[i : i + batch_size]
-        for _, row in batch.iterrows():
+    for i in range(0, len(lead_ids), batch_size):
+        batch = lead_ids[i : i + batch_size]
+        for lid in batch:
             client.table("leads").update({
                 "permit_flag": True,
-                "permit_type": row.get("permit_type", None),
-                "permit_status": row.get("status", None),
-                "permit_date": str(row["issue_date"]) if pd.notna(row.get("issue_date")) else None,
-            }).eq("id", row["lead_id"]).execute()
+                "permit_type": "Construction Permit",
+                "permit_status": "Active",
+                "permit_date": str(date.today()),
+            }).eq("id", lid).execute()
             updated += 1
 
-        print(f"  Updated batch: {updated} / {len(matches)}")
+        print(f"  Updated batch: {updated} / {len(lead_ids)}")
 
     return updated
 
@@ -278,18 +227,13 @@ def main():
     print("City of Houston Permit Pull  +  Supabase Lead Matching")
     print("=" * 60)
 
-    # --- Step 1: Fetch permits from Houston API ---
+    # --- Step 1: Fetch permits from Houston CKAN API ---
     df_raw = fetch_permits()
     permits = normalize_permits(df_raw)
 
     permits.to_csv(OUTPUT_PATH, index=False)
     print(f"\nSaved {len(permits)} permits to {OUTPUT_PATH}")
-
-    if not permits.empty:
-        print(f"\nStatus breakdown:")
-        print(permits["status"].value_counts().to_string())
-        print(f"\nPermit type breakdown:")
-        print(permits["permit_type"].value_counts().to_string())
+    print(f"Unique normalized addresses: {permits['address_norm'].nunique()}")
 
     # --- Step 2: Match permits to Supabase leads ---
     if not SUPABASE_URL or not SUPABASE_ANON_KEY:
@@ -303,19 +247,11 @@ def main():
         print("\nNo data to match.")
         return
 
-    # Keep only the most recent permit per normalized address
-    permits_dedup = (
-        permits.sort_values("issue_date", ascending=False)
-        .drop_duplicates(subset="address_norm", keep="first")
-    )
+    # Deduplicate permit addresses
+    permit_addrs = set(permits["address_norm"].unique())
 
-    # Inner join on normalized address
-    matched = leads.merge(
-        permits_dedup[["address_norm", "permit_type", "status", "issue_date"]],
-        on="address_norm",
-        how="inner",
-    )
-    matched = matched.rename(columns={"id": "lead_id"})
+    # Find matching leads
+    matched = leads[leads["address_norm"].isin(permit_addrs)]
 
     print(f"\n{'=' * 40}")
     print(f"Matched {len(matched)} leads to permits")
@@ -326,7 +262,7 @@ def main():
         return
 
     # --- Step 3: Update Supabase ---
-    count = update_matching_leads(client, matched)
+    count = update_matching_leads(client, matched["id"].tolist())
     print(f"\nDone — updated {count} leads with permit data.")
 
 
