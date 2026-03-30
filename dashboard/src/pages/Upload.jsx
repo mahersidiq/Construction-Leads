@@ -119,8 +119,17 @@ export default function Upload({ onDone }) {
       let acctIdx = -1;
       let classIdx = -1;
       let yrIdx = -1;
-      let addrIdx = -1;
       let valIdx = -1;
+      // Address columns (may be split across multiple columns)
+      let siteAddr1Idx = -1;
+      let siteAddr2Idx = -1;
+      let siteAddr3Idx = -1;
+      // Mail address columns from real_acct
+      let mailAddr1Idx = -1;
+      let mailAddr2Idx = -1;
+      let mailCityIdx = -1;
+      let mailStateIdx = -1;
+      let mailZipIdx = -1;
 
       // Store only filtered rows as lightweight objects
       const filtered = [];
@@ -131,9 +140,18 @@ export default function Upload({ onDone }) {
         (headers) => {
           acctIdx = findColIndex(headers, ["acct", "account", "acct_number"]);
           classIdx = findColIndex(headers, ["state_class", "state_cd", "class_cd", "impr_state_cd"]);
-          yrIdx = findColIndex(headers, ["yr_built", "year_built", "yr_impr"]);
-          addrIdx = findColIndex(headers, ["site_addr", "property_address", "address", "situs"]);
+          yrIdx = findColIndex(headers, ["yr_impr", "yr_built", "year_built"]);
           valIdx = findColIndex(headers, ["tot_appr_val", "appraised_value", "total_appraised_value", "appr_val"]);
+          // HCAD splits property address into site_addr_1/2/3
+          siteAddr1Idx = headers.indexOf("site_addr_1");
+          siteAddr2Idx = headers.indexOf("site_addr_2");
+          siteAddr3Idx = headers.indexOf("site_addr_3");
+          // HCAD has mail address in real_acct itself
+          mailAddr1Idx = headers.indexOf("mail_addr_1");
+          mailAddr2Idx = headers.indexOf("mail_addr_2");
+          mailCityIdx = headers.indexOf("mail_city");
+          mailStateIdx = headers.indexOf("mail_state");
+          mailZipIdx = headers.indexOf("mail_zip");
           if (acctIdx === -1) acctIdx = 0;
           setDebug(`Columns: ${headers.join(", ")}`);
         },
@@ -148,10 +166,27 @@ export default function Upload({ onDone }) {
             if (isNaN(yr) || yr < 1980 || yr > 2005) return;
           }
 
+          // Build property address from split columns
+          const addrParts = [siteAddr1Idx, siteAddr2Idx, siteAddr3Idx]
+            .filter((i) => i !== -1)
+            .map((i) => (cols[i] || "").trim())
+            .filter(Boolean);
+          const propertyAddress = addrParts.join(" ").replace(/\s+/g, " ").trim();
+
+          // Build mailing address from split columns
+          const mailParts = [mailAddr1Idx, mailAddr2Idx, mailCityIdx, mailStateIdx, mailZipIdx]
+            .filter((i) => i !== -1)
+            .map((i) => (cols[i] || "").trim())
+            .filter(Boolean);
+          const mailAddress = mailParts.join(" ").replace(/\s+/g, " ").trim();
+          const mailState = mailStateIdx !== -1 ? (cols[mailStateIdx] || "").trim().toUpperCase() : "";
+
           const acct = cols[acctIdx] || "";
           filtered.push({
             acct_number: acct,
-            property_address: addrIdx !== -1 ? cols[addrIdx] || "" : "",
+            property_address: propertyAddress,
+            owner_mail_address: mailAddress,
+            mail_state: mailState,
             year_built: yrIdx !== -1 ? parseInt(cols[yrIdx]) || null : null,
             appraised_value: valIdx !== -1 ? parseFloat(cols[valIdx]) || null : null,
           });
@@ -180,9 +215,8 @@ export default function Upload({ onDone }) {
       setProgress(45);
 
       // --- Pass 2: Stream owners, only keep those matching filtered accts ---
+      // owners.txt has: acct, ln_num, name, aka, pct_own
       let ownerNameIdx = -1;
-      let ownerMailIdx = -1;
-      let ownerMailStateIdx = -1;
       let ownerAcctIdx = -1;
       const ownerMap = {};
 
@@ -190,9 +224,7 @@ export default function Upload({ onDone }) {
         ownersFile,
         (headers) => {
           ownerAcctIdx = findColIndex(headers, ["acct", "account", "acct_number"]);
-          ownerNameIdx = findColIndex(headers, ["owner_name", "name", "owner"]);
-          ownerMailIdx = findColIndex(headers, ["mail_addr", "mailing_address", "mail_address", "tnt_mail_adr"]);
-          ownerMailStateIdx = findColIndex(headers, ["mail_state", "state", "mail_st"]);
+          ownerNameIdx = findColIndex(headers, ["name", "owner_name", "owner"]);
           if (ownerAcctIdx === -1) ownerAcctIdx = 0;
         },
         (cols) => {
@@ -201,8 +233,6 @@ export default function Upload({ onDone }) {
           if (filteredAccts.has(acct) && !ownerMap[acct]) {
             ownerMap[acct] = {
               name: ownerNameIdx !== -1 ? cols[ownerNameIdx] || "" : "",
-              mail: ownerMailIdx !== -1 ? cols[ownerMailIdx] || "" : "",
-              state: ownerMailStateIdx !== -1 ? (cols[ownerMailStateIdx] || "").toUpperCase().trim() : "",
             };
           }
         },
@@ -219,16 +249,17 @@ export default function Upload({ onDone }) {
       setProgress(70);
 
       // --- Score leads ---
+      // Mail address comes from real_acct (prop), owner name from owners.txt
       const leads = filtered.map((prop) => {
         const owner = ownerMap[prop.acct_number] || {};
-        const ownerState = owner.state || extractState(owner.mail || "");
+        const ownerState = prop.mail_state || extractState(prop.owner_mail_address || "");
         const outOfState = ownerState !== "" && ownerState !== "TX";
 
         const lead = {
           acct_number: prop.acct_number,
           property_address: prop.property_address,
           owner_name: owner.name || "",
-          owner_mail_address: owner.mail || "",
+          owner_mail_address: prop.owner_mail_address || "",
           year_built: prop.year_built,
           appraised_value: prop.appraised_value,
           unit_count: null,
