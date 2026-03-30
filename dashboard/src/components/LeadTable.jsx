@@ -10,6 +10,7 @@ const COLUMNS = [
   { key: "owner_mail_address", label: "Mail Address" },
   { key: "year_built", label: "Year" },
   { key: "appraised_value", label: "Value" },
+  { key: "unit_count", label: "Units" },
   { key: "lead_score", label: "Score" },
   { key: "permit_flag", label: "Permit" },
 ];
@@ -293,6 +294,7 @@ export default function LeadTable({ leads, onUpdate, sortCol, sortAsc, onSort })
               </td>
               <td className="px-3 py-2 text-sm text-gray-600">{lead.year_built}</td>
               <td className="px-3 py-2 text-sm text-gray-600">{formatCurrency(lead.appraised_value)}</td>
+              <td className="px-3 py-2 text-sm text-gray-600">{lead.unit_count || <span className="text-gray-300">--</span>}</td>
               <td className="px-3 py-2"><ScoreBadge score={lead.lead_score} /></td>
               <td className="px-3 py-2 text-sm">
                 {lead.permit_flag ? (

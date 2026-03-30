@@ -21,10 +21,34 @@ function extractState(addr) {
 
 function scoreLead(lead) {
   let s = 0;
+
+  // Out-of-state owner (likely absentee, more motivated to sell/renovate)
   if (lead.out_of_state_owner) s += 20;
-  if (lead.year_built && lead.year_built < 1990) s += 15;
-  if (lead.appraised_value && lead.appraised_value > 1000000) s += 15;
-  if (lead.unit_count && lead.unit_count > 20) s += 15;
+
+  // Age tiers (older = more likely to need construction work)
+  const yr = lead.year_built;
+  if (yr && yr < 1970) s += 20;
+  else if (yr && yr < 1985) s += 15;
+  else if (yr && yr < 1995) s += 10;
+  else if (yr && yr < 2005) s += 5;
+
+  // Value tiers (higher value = bigger project potential)
+  const val = lead.appraised_value;
+  if (val && val > 5000000) s += 20;
+  else if (val && val > 2000000) s += 15;
+  else if (val && val > 1000000) s += 10;
+  else if (val && val > 500000) s += 5;
+
+  // Unit count (more units = bigger project)
+  const units = lead.unit_count;
+  if (units && units > 50) s += 20;
+  else if (units && units > 20) s += 15;
+  else if (units && units > 10) s += 10;
+  else if (units && units > 4) s += 5;
+
+  // Permit flag (has active/problem permits = hot lead)
+  if (lead.permit_flag) s += 20;
+
   return Math.min(s, 100);
 }
 
@@ -96,9 +120,10 @@ export default function Upload({ onDone }) {
 
     const acctFile = e.target.elements.realAcct.files[0];
     const ownersFile = e.target.elements.owners.files[0];
+    const buildingFile = e.target.elements.building?.files[0] || null;
 
     if (!acctFile || !ownersFile) {
-      setStatus("Please select both files.");
+      setStatus("Please select real_acct.txt and owners.txt.");
       return;
     }
 
@@ -243,11 +268,52 @@ export default function Upload({ onDone }) {
         },
       );
 
+      // --- Pass 3 (optional): Stream building_res.txt for unit counts ---
+      const unitMap = {};
+      if (buildingFile) {
+        setStatus(
+          `Reading building data (${(buildingFile.size / 1024 / 1024).toFixed(0)} MB)...`,
+        );
+        setProgress(65);
+
+        let bldAcctIdx = -1;
+        let unitsIdx = -1;
+
+        await streamLines(
+          buildingFile,
+          (headers) => {
+            bldAcctIdx = findColIndex(headers, ["acct", "account", "acct_number"]);
+            // HCAD building_res uses "units" or "nbr_units" or "no_of_units"
+            unitsIdx = findColIndex(headers, ["units", "nbr_units", "no_of_units", "unit_count", "nbr_of_units"]);
+            if (bldAcctIdx === -1) bldAcctIdx = 0;
+            setDebug((prev) => prev + ` | Building cols: ${headers.join(", ")}`);
+          },
+          (cols) => {
+            const acct = cols[bldAcctIdx] || "";
+            if (!filteredAccts.has(acct)) return;
+            if (unitsIdx !== -1) {
+              const u = parseInt(cols[unitsIdx]);
+              if (!isNaN(u) && u > 0) {
+                // Keep the highest unit count per account (multiple building records possible)
+                unitMap[acct] = Math.max(unitMap[acct] || 0, u);
+              }
+            }
+          },
+          (bytes, total, lines) => {
+            const pct = 65 + Math.round((bytes / total) * 5);
+            setProgress(pct);
+            setStatus(
+              `Reading building data: ${lines.toLocaleString()} rows, ${Object.keys(unitMap).length} unit counts...`,
+            );
+          },
+        );
+      }
+
       setStatus(`Scoring ${filtered.length} leads...`);
-      setProgress(70);
+      setProgress(72);
 
       // --- Score leads ---
-      // Mail address comes from real_acct (prop), owner name from owners.txt
+      // Mail address from real_acct (prop), owner name from owners.txt, units from building_res
       const leads = filtered.map((prop) => {
         const owner = ownerMap[prop.acct_number] || {};
         const ownerState = prop.mail_state || extractState(prop.owner_mail_address || "");
@@ -261,7 +327,7 @@ export default function Upload({ onDone }) {
           state_class: prop.state_class || "",
           year_built: prop.year_built,
           appraised_value: prop.appraised_value,
-          unit_count: null,
+          unit_count: unitMap[prop.acct_number] || null,
           out_of_state_owner: outOfState,
           permit_flag: false,
           lead_score: 0,
@@ -353,6 +419,23 @@ export default function Upload({ onDone }) {
             accept=".txt,.csv"
             disabled={processing}
             className="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
+          />
+        </div>
+
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">
+            building_res.txt
+            <span className="text-gray-400 font-normal">
+              {" "}
+              (from Real_building_land folder - optional, adds unit counts)
+            </span>
+          </label>
+          <input
+            name="building"
+            type="file"
+            accept=".txt,.csv"
+            disabled={processing}
+            className="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-green-50 file:text-green-700 hover:file:bg-green-100"
           />
         </div>
 

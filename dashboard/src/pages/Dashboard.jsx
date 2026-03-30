@@ -34,17 +34,27 @@ export default function Dashboard({ onLogout, onUpload }) {
       return;
     }
     setLoading(true);
-    const { data, error: fetchError } = await supabase
-      .from("leads")
-      .select("*")
-      .order("lead_score", { ascending: false });
-
-    if (fetchError) {
-      console.error("Error fetching leads:", fetchError);
-      setError("Failed to load leads. Check your Supabase configuration.");
-    } else {
-      setAllLeads(data || []);
+    // Paginate to get ALL leads (Supabase default limit is 1000)
+    let allData = [];
+    let from = 0;
+    const pageSize = 1000;
+    while (true) {
+      const { data, error: fetchError } = await supabase
+        .from("leads")
+        .select("*")
+        .order("lead_score", { ascending: false })
+        .range(from, from + pageSize - 1);
+      if (fetchError) {
+        console.error("Error fetching leads:", fetchError);
+        setError("Failed to load leads. Check your Supabase configuration.");
+        setLoading(false);
+        return;
+      }
+      allData = allData.concat(data || []);
+      if (!data || data.length < pageSize) break;
+      from += pageSize;
     }
+    setAllLeads(allData);
     setLoading(false);
   }, []);
 
