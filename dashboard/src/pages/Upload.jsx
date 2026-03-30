@@ -1,13 +1,9 @@
 import { useState } from "react";
 import { supabase, supabaseConfigured } from "../lib/supabase";
 
-const MULTIFAMILY_CODES = new Set();
-["A", "B", "F"].forEach((prefix) => {
-  const end = prefix === "A" ? 9 : 4;
-  for (let i = 1; i <= end; i++) {
-    MULTIFAMILY_CODES.add(`${prefix}${i}`);
-  }
-});
+// B1=Apartments, B2=Duplexes, B3=Triplexes/Fourplexes, B4=Manufactured housing parks
+// These are the actual multifamily/apartment codes in HCAD
+const MULTIFAMILY_CODES = new Set(["B1", "B2", "B3", "B4"]);
 
 function findColIndex(headers, candidates) {
   for (const c of candidates) {
@@ -182,11 +178,13 @@ export default function Upload({ onDone }) {
           const mailState = mailStateIdx !== -1 ? (cols[mailStateIdx] || "").trim().toUpperCase() : "";
 
           const acct = cols[acctIdx] || "";
+          const stateClass = classIdx !== -1 ? (cols[classIdx] || "").toUpperCase().trim() : "";
           filtered.push({
             acct_number: acct,
             property_address: propertyAddress,
             owner_mail_address: mailAddress,
             mail_state: mailState,
+            state_class: stateClass,
             year_built: yrIdx !== -1 ? parseInt(cols[yrIdx]) || null : null,
             appraised_value: valIdx !== -1 ? parseFloat(cols[valIdx]) || null : null,
           });
@@ -260,6 +258,7 @@ export default function Upload({ onDone }) {
           property_address: prop.property_address,
           owner_name: owner.name || "",
           owner_mail_address: prop.owner_mail_address || "",
+          state_class: prop.state_class || "",
           year_built: prop.year_built,
           appraised_value: prop.appraised_value,
           unit_count: null,

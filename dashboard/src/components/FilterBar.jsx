@@ -7,6 +7,14 @@ const STATUSES = [
   { value: "lost", label: "Lost" },
 ];
 
+const PROPERTY_TYPES = [
+  { value: "", label: "All Types" },
+  { value: "B1", label: "B1 - Apartments" },
+  { value: "B2", label: "B2 - Duplexes" },
+  { value: "B3", label: "B3 - Tri/Fourplex" },
+  { value: "B4", label: "B4 - Mfg Housing" },
+];
+
 export default function FilterBar({ filters, onChange }) {
   const update = (key, value) => {
     onChange({ ...filters, [key]: value });
@@ -56,6 +64,22 @@ export default function FilterBar({ filters, onChange }) {
 
       {/* Row 2: Numeric filters and checkboxes */}
       <div className="flex flex-wrap gap-3 items-end">
+        <div>
+          <label className="block text-xs font-medium text-gray-500 mb-1">
+            Property Type
+          </label>
+          <select
+            value={filters.propertyType}
+            onChange={(e) => update("propertyType", e.target.value)}
+            className="border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
+          >
+            {PROPERTY_TYPES.map((t) => (
+              <option key={t.value} value={t.value}>
+                {t.label}
+              </option>
+            ))}
+          </select>
+        </div>
         <div>
           <label className="block text-xs font-medium text-gray-500 mb-1">
             Status

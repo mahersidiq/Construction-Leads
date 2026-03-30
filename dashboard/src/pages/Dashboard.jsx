@@ -14,6 +14,7 @@ const DEFAULT_FILTERS = {
   addressSearch: "",
   ownerSearch: "",
   zipCode: "",
+  propertyType: "",
   permitOnly: false,
   outOfStateOnly: false,
 };
@@ -87,6 +88,8 @@ export default function Dashboard({ onLogout, onUpload }) {
         if (!(lead.property_address || "").includes(filters.zipCode))
           return false;
       }
+      if (filters.propertyType && lead.state_class !== filters.propertyType)
+        return false;
       if (filters.permitOnly && !lead.permit_flag) return false;
       if (filters.outOfStateOnly && !lead.out_of_state_owner) return false;
       return true;
