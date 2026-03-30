@@ -1,0 +1,36 @@
+name: Ingest Leads
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * 1"  # Every Monday at 6am UTC
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install pandas requests supabase python-dotenv
+
+      - name: Download HCAD data
+        run: python scripts/hcad_download.py
+
+      - name: Pull Houston permits
+        run: python scripts/permit_pull.py
+
+      - name: Join and score leads
+        run: python scripts/join_score.py
+
+      - name: Sync to Supabase
+        run: python scripts/sync_supabase.py
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
