@@ -21,16 +21,27 @@ jobs:
         run: pip install pandas requests supabase python-dotenv
 
       - name: Download HCAD data
+        id: hcad
+        continue-on-error: true
         run: python scripts/hcad_download.py
 
       - name: Pull Houston permits
         run: python scripts/permit_pull.py
 
       - name: Join and score leads
+        if: steps.hcad.outcome == 'success'
         run: python scripts/join_score.py
 
       - name: Sync to Supabase
+        if: steps.hcad.outcome == 'success'
         run: python scripts/sync_supabase.py
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+
+      - name: Report HCAD failure
+        if: steps.hcad.outcome == 'failure'
+        run: |
+          echo "::warning::HCAD bulk download failed. This is expected if HCAD is blocking automated access."
+          echo "Download manually from https://hcad.org/pdata/pdata-property-downloads.html"
+          echo "Place Real_acct_owner.zip and building_res.zip in scripts/ and re-run."
