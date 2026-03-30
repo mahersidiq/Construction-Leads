@@ -110,6 +110,27 @@ export default function Dashboard({ onLogout, onUpload }) {
       return sortAsc ? cmp : -cmp;
     });
 
+  const exportCsv = () => {
+    const headers = ["property_address","owner_name","owner_mail_address","phone","email","year_built","appraised_value","lead_score","permit_flag","permit_status","out_of_state_owner","status","notes","acct_number"];
+    const rows = filteredLeads.map((l) =>
+      headers.map((h) => {
+        const v = l[h];
+        if (v == null) return "";
+        const s = String(v);
+        return s.includes(",") || s.includes('"') || s.includes("\n")
+          ? `"${s.replace(/"/g, '""')}"` : s;
+      }).join(",")
+    );
+    const csv = [headers.join(","), ...rows].join("\n");
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `construction-leads-${new Date().toISOString().slice(0,10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <div className="min-h-screen bg-gray-50">
       <header className="bg-white shadow-sm border-b border-gray-200">
@@ -124,6 +145,12 @@ export default function Dashboard({ onLogout, onUpload }) {
             <span className="text-xs text-gray-400">
               {allLeads.length} total &middot; {filteredLeads.length} shown
             </span>
+            <button
+              onClick={exportCsv}
+              className="text-sm text-green-600 hover:text-green-800 transition-colors font-medium"
+            >
+              Export CSV
+            </button>
             {onUpload && (
               <button
                 onClick={onUpload}
