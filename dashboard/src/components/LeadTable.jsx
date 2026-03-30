@@ -4,7 +4,27 @@ import { ScoreBadge } from "./StatusBadge";
 
 const STATUSES = ["new", "contacted", "follow_up", "won", "lost"];
 
-export default function LeadTable({ leads, onUpdate }) {
+const COLUMNS = [
+  { key: "property_address", label: "Address" },
+  { key: "owner_name", label: "Owner" },
+  { key: "owner_mail_address", label: "Mail Address" },
+  { key: "year_built", label: "Year Built" },
+  { key: "appraised_value", label: "Value" },
+  { key: "lead_score", label: "Score" },
+  { key: "permit_flag", label: "Permit" },
+];
+
+function SortArrow({ col, sortCol, sortAsc }) {
+  if (col !== sortCol) return <span className="text-gray-300 ml-1">↕</span>;
+  return <span className="ml-1">{sortAsc ? "↑" : "↓"}</span>;
+}
+
+function formatCurrency(val) {
+  if (val == null) return "--";
+  return "$" + Number(val).toLocaleString("en-US", { maximumFractionDigits: 0 });
+}
+
+export default function LeadTable({ leads, onUpdate, sortCol, sortAsc, onSort }) {
   const [editingNotes, setEditingNotes] = useState(null);
   const [notesValue, setNotesValue] = useState("");
 
@@ -49,21 +69,16 @@ export default function LeadTable({ leads, onUpdate }) {
       <table className="min-w-full divide-y divide-gray-200">
         <thead className="bg-gray-50">
           <tr>
-            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-              Address
-            </th>
-            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-              Owner
-            </th>
-            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-              Year Built
-            </th>
-            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-              Score
-            </th>
-            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-              Permit
-            </th>
+            {COLUMNS.map((col) => (
+              <th
+                key={col.key}
+                onClick={() => onSort(col.key)}
+                className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:text-gray-700 select-none"
+              >
+                {col.label}
+                <SortArrow col={col.key} sortCol={sortCol} sortAsc={sortAsc} />
+              </th>
+            ))}
             <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
               Status
             </th>
@@ -75,14 +90,20 @@ export default function LeadTable({ leads, onUpdate }) {
         <tbody className="bg-white divide-y divide-gray-200">
           {leads.map((lead) => (
             <tr key={lead.id} className="hover:bg-gray-50">
-              <td className="px-4 py-3 text-sm text-gray-900 max-w-xs truncate">
+              <td className="px-4 py-3 text-sm text-gray-900 max-w-xs truncate" title={lead.property_address}>
                 {lead.property_address}
               </td>
-              <td className="px-4 py-3 text-sm text-gray-600 max-w-xs truncate">
+              <td className="px-4 py-3 text-sm text-gray-600 max-w-[200px] truncate" title={lead.owner_name}>
                 {lead.owner_name}
+              </td>
+              <td className="px-4 py-3 text-sm text-gray-500 max-w-[200px] truncate" title={lead.owner_mail_address}>
+                {lead.owner_mail_address || <span className="text-gray-300">--</span>}
               </td>
               <td className="px-4 py-3 text-sm text-gray-600">
                 {lead.year_built}
+              </td>
+              <td className="px-4 py-3 text-sm text-gray-600">
+                {formatCurrency(lead.appraised_value)}
               </td>
               <td className="px-4 py-3">
                 <ScoreBadge score={lead.lead_score} />
