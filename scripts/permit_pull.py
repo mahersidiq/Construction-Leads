@@ -23,11 +23,11 @@ PAGE_SIZE = 50000
 def build_query_params(offset: int = 0) -> dict:
     """Build SoQL query parameters for the Socrata API."""
     cutoff = (datetime.now() - timedelta(days=730)).strftime("%Y-%m-%dT00:00:00")
-    type_list = ", ".join(f"'{t}'" for t in PERMIT_TYPES)
+    type_list = ", ".join(f"'{t.lower()}'" for t in PERMIT_TYPES)
     status_list = ", ".join(f"'{s}'" for s in PROBLEM_STATUSES)
 
     where_clause = (
-        f"lower(permit_type) in ({', '.join(f\"'{t}'\" for t in PERMIT_TYPES)}) "
+        f"lower(permit_type) in ({type_list}) "
         f"AND status in ({status_list}) "
         f"AND issue_date >= '{cutoff}'"
     )
