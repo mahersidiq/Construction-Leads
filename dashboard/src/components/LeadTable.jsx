@@ -1,0 +1,139 @@
+import { useState } from "react";
+import { supabase } from "../lib/supabase";
+import { ScoreBadge } from "./StatusBadge";
+
+const STATUSES = ["new", "contacted", "follow_up", "won", "lost"];
+
+export default function LeadTable({ leads, onUpdate }) {
+  const [editingNotes, setEditingNotes] = useState(null);
+  const [notesValue, setNotesValue] = useState("");
+
+  const handleStatusChange = async (id, newStatus) => {
+    await supabase.from("leads").update({ status: newStatus }).eq("id", id);
+    onUpdate();
+  };
+
+  const startEditNotes = (lead) => {
+    setEditingNotes(lead.id);
+    setNotesValue(lead.notes || "");
+  };
+
+  const saveNotes = async (id) => {
+    await supabase.from("leads").update({ notes: notesValue }).eq("id", id);
+    setEditingNotes(null);
+    onUpdate();
+  };
+
+  const handleNotesKeyDown = (e, id) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      saveNotes(id);
+    }
+    if (e.key === "Escape") {
+      setEditingNotes(null);
+    }
+  };
+
+  if (leads.length === 0) {
+    return (
+      <div className="text-center py-12 text-gray-500">
+        No leads match the current filters.
+      </div>
+    );
+  }
+
+  return (
+    <div className="overflow-x-auto">
+      <table className="min-w-full divide-y divide-gray-200">
+        <thead className="bg-gray-50">
+          <tr>
+            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+              Address
+            </th>
+            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+              Owner
+            </th>
+            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+              Year Built
+            </th>
+            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+              Score
+            </th>
+            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+              Permit
+            </th>
+            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+              Status
+            </th>
+            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+              Notes
+            </th>
+          </tr>
+        </thead>
+        <tbody className="bg-white divide-y divide-gray-200">
+          {leads.map((lead) => (
+            <tr key={lead.id} className="hover:bg-gray-50">
+              <td className="px-4 py-3 text-sm text-gray-900 max-w-xs truncate">
+                {lead.property_address}
+              </td>
+              <td className="px-4 py-3 text-sm text-gray-600 max-w-xs truncate">
+                {lead.owner_name}
+              </td>
+              <td className="px-4 py-3 text-sm text-gray-600">
+                {lead.year_built}
+              </td>
+              <td className="px-4 py-3">
+                <ScoreBadge score={lead.lead_score} />
+              </td>
+              <td className="px-4 py-3 text-sm">
+                {lead.permit_flag ? (
+                  <span className="text-orange-600 font-medium">
+                    {lead.permit_status || "Yes"}
+                  </span>
+                ) : (
+                  <span className="text-gray-400">--</span>
+                )}
+              </td>
+              <td className="px-4 py-3">
+                <select
+                  value={lead.status || "new"}
+                  onChange={(e) => handleStatusChange(lead.id, e.target.value)}
+                  className="text-sm border border-gray-300 rounded-md px-2 py-1 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                >
+                  {STATUSES.map((s) => (
+                    <option key={s} value={s}>
+                      {s.replace("_", " ")}
+                    </option>
+                  ))}
+                </select>
+              </td>
+              <td className="px-4 py-3 text-sm max-w-xs">
+                {editingNotes === lead.id ? (
+                  <textarea
+                    value={notesValue}
+                    onChange={(e) => setNotesValue(e.target.value)}
+                    onKeyDown={(e) => handleNotesKeyDown(e, lead.id)}
+                    onBlur={() => saveNotes(lead.id)}
+                    className="w-full text-sm border border-gray-300 rounded-md px-2 py-1 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                    rows={2}
+                    autoFocus
+                  />
+                ) : (
+                  <div
+                    onClick={() => startEditNotes(lead)}
+                    className="cursor-pointer text-gray-600 hover:text-gray-900 min-h-[1.5rem] truncate"
+                    title="Click to edit"
+                  >
+                    {lead.notes || (
+                      <span className="text-gray-300 italic">Add notes...</span>
+                    )}
+                  </div>
+                )}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
