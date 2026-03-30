@@ -9,25 +9,12 @@ const MULTIFAMILY_CODES = new Set();
   }
 });
 
-function parseTab(text) {
-  const lines = text.split("\n").filter((l) => l.trim());
-  if (lines.length === 0) return [];
-  const headers = lines[0].split("\t").map((h) => h.trim().toLowerCase());
-  return lines.slice(1).map((line) => {
-    const vals = line.split("\t");
-    const row = {};
-    headers.forEach((h, i) => {
-      row[h] = (vals[i] || "").trim();
-    });
-    return row;
-  });
-}
-
-function findCol(row, candidates) {
+function findColIndex(headers, candidates) {
   for (const c of candidates) {
-    if (c in row) return c;
+    const idx = headers.indexOf(c);
+    if (idx !== -1) return idx;
   }
-  return null;
+  return -1;
 }
 
 function extractState(addr) {
@@ -45,8 +32,51 @@ function scoreLead(lead) {
   return Math.min(s, 100);
 }
 
+async function streamParseFile(file, onProgress) {
+  const reader = file.stream().getReader();
+  const decoder = new TextDecoder("utf-8");
+  let buffer = "";
+  let headers = null;
+  const rows = [];
+  let bytesRead = 0;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    bytesRead += value.length;
+    buffer += decoder.decode(value, { stream: true });
+
+    const lines = buffer.split("\n");
+    buffer = lines.pop();
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+
+      if (!headers) {
+        headers = trimmed.split("\t").map((h) => h.trim().toLowerCase());
+        continue;
+      }
+
+      rows.push(trimmed.split("\t").map((v) => v.trim()));
+    }
+
+    if (onProgress) {
+      onProgress(bytesRead, file.size, rows.length, headers);
+    }
+  }
+
+  if (buffer.trim() && headers) {
+    rows.push(buffer.trim().split("\t").map((v) => v.trim()));
+  }
+
+  return { headers, rows };
+}
+
 export default function Upload({ onDone }) {
   const [status, setStatus] = useState("");
+  const [debug, setDebug] = useState("");
   const [processing, setProcessing] = useState(false);
   const [progress, setProgress] = useState(0);
 
@@ -66,86 +96,121 @@ export default function Upload({ onDone }) {
     }
 
     setProcessing(true);
-    setStatus("Reading real_acct file...");
+    setDebug("");
+    setStatus(
+      `Reading real_acct file (${(acctFile.size / 1024 / 1024).toFixed(0)} MB)...`,
+    );
 
     try {
-      const acctText = await acctFile.text();
-      const acctRows = parseTab(acctText);
-      setStatus(`Loaded ${acctRows.length} property records. Filtering...`);
+      // Stream-parse real_acct
+      const acctData = await streamParseFile(acctFile, (bytes, total, rowCount, headers) => {
+        const pct = Math.round((bytes / total) * 50);
+        setProgress(pct);
+        if (rowCount % 100000 === 0 && rowCount > 0) {
+          setStatus(`Reading real_acct: ${rowCount} rows (${Math.round((bytes / total) * 100)}%)...`);
+        }
+      });
 
-      if (acctRows.length === 0) {
+      if (!acctData.headers || acctData.rows.length === 0) {
+        setDebug(
+          `Headers found: ${acctData.headers ? acctData.headers.join(", ") : "none"}. Rows: ${acctData.rows.length}`,
+        );
         setStatus("Error: No data found in real_acct file.");
         setProcessing(false);
         return;
       }
 
-      const sample = acctRows[0];
-      const acctCol = findCol(sample, ["acct", "account", "acct_number"]) || Object.keys(sample)[0];
-      const classCol = findCol(sample, ["state_class", "state_cd", "class_cd", "impr_state_cd"]);
-      const yrCol = findCol(sample, ["yr_built", "year_built", "yr_impr"]);
-      const addrCol = findCol(sample, ["site_addr", "property_address", "address", "situs"]);
-      const valCol = findCol(sample, ["tot_appr_val", "appraised_value", "total_appraised_value", "appr_val"]);
+      const h = acctData.headers;
+      setDebug(`Columns: ${h.join(", ")}`);
 
-      let filtered = acctRows;
+      const acctIdx = findColIndex(h, ["acct", "account", "acct_number"]);
+      const classIdx = findColIndex(h, ["state_class", "state_cd", "class_cd", "impr_state_cd"]);
+      const yrIdx = findColIndex(h, ["yr_built", "year_built", "yr_impr"]);
+      const addrIdx = findColIndex(h, ["site_addr", "property_address", "address", "situs"]);
+      const valIdx = findColIndex(h, ["tot_appr_val", "appraised_value", "total_appraised_value", "appr_val"]);
 
-      if (classCol) {
-        filtered = filtered.filter((r) =>
-          MULTIFAMILY_CODES.has((r[classCol] || "").toUpperCase()),
-        );
-        setStatus(`Multifamily properties: ${filtered.length}. Filtering by year...`);
+      const realAcctIdx = acctIdx !== -1 ? acctIdx : 0;
+
+      setStatus(
+        `Loaded ${acctData.rows.length} records. Filtering multifamily + year 1980-2005...`,
+      );
+
+      // Filter in one pass
+      const filtered = [];
+      for (const row of acctData.rows) {
+        if (classIdx !== -1) {
+          const cls = (row[classIdx] || "").toUpperCase();
+          if (!MULTIFAMILY_CODES.has(cls)) continue;
+        }
+        if (yrIdx !== -1) {
+          const yr = parseInt(row[yrIdx]);
+          if (isNaN(yr) || yr < 1980 || yr > 2005) continue;
+        }
+        filtered.push(row);
       }
 
-      if (yrCol) {
-        filtered = filtered.filter((r) => {
-          const yr = parseInt(r[yrCol]);
-          return yr >= 1980 && yr <= 2005;
-        });
-        setStatus(`After year filter: ${filtered.length}. Loading owners...`);
-      }
+      setStatus(
+        `Found ${filtered.length} matching properties. Reading owners file...`,
+      );
+      setProgress(55);
 
-      const ownersText = await ownersFile.text();
-      const ownerRows = parseTab(ownersText);
-      setStatus(`Loaded ${ownerRows.length} owner records. Joining...`);
-
-      const ownerSample = ownerRows[0] || {};
-      const ownerAcctCol = findCol(ownerSample, ["acct", "account", "acct_number"]) || Object.keys(ownerSample)[0];
-      const nameCol = findCol(ownerSample, ["owner_name", "name", "owner"]);
-      const mailCol = findCol(ownerSample, ["mail_addr", "mailing_address", "mail_address", "tnt_mail_adr"]);
-      const mailStateCol = findCol(ownerSample, ["mail_state", "state", "mail_st"]);
-
-      const ownerMap = {};
-      ownerRows.forEach((r) => {
-        const key = r[ownerAcctCol];
-        if (!ownerMap[key]) ownerMap[key] = r;
+      // Stream-parse owners
+      const ownersData = await streamParseFile(ownersFile, (bytes, total) => {
+        const pct = 55 + Math.round((bytes / total) * 15);
+        setProgress(pct);
       });
 
-      const leads = filtered.map((r) => {
-        const acct = r[acctCol];
-        const owner = ownerMap[acct] || {};
-        const mailAddr = mailCol ? owner[mailCol] || "" : "";
-        const ownerState = mailStateCol
-          ? (owner[mailStateCol] || "").toUpperCase().trim()
-          : extractState(mailAddr);
+      const oh = ownersData.headers;
+      const ownerAcctIdx = findColIndex(oh, ["acct", "account", "acct_number"]);
+      const nameIdx = findColIndex(oh, ["owner_name", "name", "owner"]);
+      const mailIdx = findColIndex(oh, ["mail_addr", "mailing_address", "mail_address", "tnt_mail_adr"]);
+      const mailStateIdx = findColIndex(oh, ["mail_state", "state", "mail_st"]);
+
+      const realOwnerAcctIdx = ownerAcctIdx !== -1 ? ownerAcctIdx : 0;
+
+      // Build owner lookup
+      const ownerMap = {};
+      for (const row of ownersData.rows) {
+        const key = row[realOwnerAcctIdx];
+        if (key && !ownerMap[key]) ownerMap[key] = row;
+      }
+
+      setStatus(`Joined ${Object.keys(ownerMap).length} owners. Scoring leads...`);
+      setProgress(75);
+
+      // Build and score leads
+      const leads = [];
+      for (const row of filtered) {
+        const acct = row[realAcctIdx] || "";
+        const owner = ownerMap[acct] || [];
+        const mailAddr = mailIdx !== -1 ? owner[mailIdx] || "" : "";
+        const ownerState =
+          mailStateIdx !== -1
+            ? (owner[mailStateIdx] || "").toUpperCase().trim()
+            : extractState(mailAddr);
         const outOfState = ownerState !== "" && ownerState !== "TX";
+        const yearBuilt = yrIdx !== -1 ? parseInt(row[yrIdx]) || null : null;
+        const appraisedValue = valIdx !== -1 ? parseFloat(row[valIdx]) || null : null;
 
         const lead = {
           acct_number: acct,
-          property_address: addrCol ? r[addrCol] || "" : "",
-          owner_name: nameCol ? owner[nameCol] || "" : "",
+          property_address: addrIdx !== -1 ? row[addrIdx] || "" : "",
+          owner_name: nameIdx !== -1 ? owner[nameIdx] || "" : "",
           owner_mail_address: mailAddr,
-          year_built: yrCol ? parseInt(r[yrCol]) || null : null,
-          appraised_value: valCol ? parseFloat(r[valCol]) || null : null,
+          year_built: yearBuilt,
+          appraised_value: appraisedValue,
           unit_count: null,
           out_of_state_owner: outOfState,
           permit_flag: false,
           lead_score: 0,
         };
         lead.lead_score = scoreLead(lead);
-        return lead;
-      });
+        leads.push(lead);
+      }
 
-      setStatus(`Scored ${leads.length} leads. Uploading to Supabase...`);
+      setStatus(`Uploading ${leads.length} leads to Supabase...`);
 
+      // Upsert in batches
       const batchSize = 500;
       let uploaded = 0;
 
@@ -156,26 +221,29 @@ export default function Upload({ onDone }) {
           .upsert(batch, { onConflict: "acct_number" });
 
         if (error) {
-          setStatus(`Error at batch ${i}: ${error.message}`);
+          setStatus(`Error at row ${i}: ${error.message}`);
           setProcessing(false);
           return;
         }
         uploaded += batch.length;
-        setProgress(Math.round((uploaded / leads.length) * 100));
+        const pct = 80 + Math.round((uploaded / leads.length) * 20);
+        setProgress(pct);
         setStatus(`Uploaded ${uploaded}/${leads.length} leads...`);
       }
 
-      setStatus(
-        `Done! ${uploaded} leads uploaded. Top scores: ${leads
-          .sort((a, b) => b.lead_score - a.lead_score)
-          .slice(0, 5)
-          .map((l) => `${l.property_address} (${l.lead_score})`)
-          .join(", ")}`,
-      );
+      const topLeads = leads
+        .sort((a, b) => b.lead_score - a.lead_score)
+        .slice(0, 5)
+        .map((l) => `${l.property_address} (${l.lead_score})`)
+        .join(", ");
+
+      setStatus(`Done! ${uploaded} leads uploaded.`);
+      setDebug(`Top leads: ${topLeads}`);
+      setProgress(100);
       setProcessing(false);
-      if (onDone) onDone();
     } catch (err) {
       setStatus(`Error: ${err.message}`);
+      setDebug(err.stack || "");
       setProcessing(false);
     }
   };
@@ -188,7 +256,7 @@ export default function Upload({ onDone }) {
       <p className="text-sm text-gray-500 mb-6">
         Upload the extracted HCAD text files to process and load leads into the
         database. Files are processed in your browser and sent directly to
-        Supabase.
+        Supabase. Large files are streamed to avoid memory issues.
       </p>
 
       <form onSubmit={handleUpload} className="space-y-4">
@@ -226,7 +294,7 @@ export default function Upload({ onDone }) {
           />
         </div>
 
-        {processing && (
+        {(processing || progress > 0) && (
           <div className="w-full bg-gray-200 rounded-full h-2.5">
             <div
               className="bg-blue-600 h-2.5 rounded-full transition-all"
@@ -241,6 +309,10 @@ export default function Upload({ onDone }) {
           >
             {status}
           </p>
+        )}
+
+        {debug && (
+          <p className="text-xs text-gray-400 font-mono break-all">{debug}</p>
         )}
 
         <button
