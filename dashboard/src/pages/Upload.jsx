@@ -283,10 +283,18 @@ export default function Upload({ onDone }) {
           buildingFile,
           (headers) => {
             bldAcctIdx = findColIndex(headers, ["acct", "account", "acct_number"]);
-            // HCAD building_res uses "units" or "nbr_units" or "no_of_units"
-            unitsIdx = findColIndex(headers, ["units", "nbr_units", "no_of_units", "unit_count", "nbr_of_units"]);
+            // HCAD building_res column for unit count - try all known variants
+            unitsIdx = findColIndex(headers, [
+              "units", "nbr_units", "no_of_units", "unit_count",
+              "nbr_of_units", "nbr_living_units", "living_units",
+              "num_units", "total_units",
+            ]);
             if (bldAcctIdx === -1) bldAcctIdx = 0;
-            setDebug((prev) => prev + ` | Building cols: ${headers.join(", ")}`);
+            setDebug(
+              `Building file: ${headers.length} columns. ` +
+              `Acct col: ${bldAcctIdx >= 0 ? headers[bldAcctIdx] : "NOT FOUND"}. ` +
+              `Units col: ${unitsIdx >= 0 ? headers[unitsIdx] : "NOT FOUND - cols: " + headers.slice(0, 20).join(", ")}`,
+            );
           },
           (cols) => {
             const acct = cols[bldAcctIdx] || "";
