@@ -32,12 +32,16 @@ function scoreLead(lead) {
   return Math.min(s, 100);
 }
 
-async function streamParseFile(file, onProgress) {
+/**
+ * Stream a file line by line, calling onLine for each data row.
+ * Only the header row is stored; the caller decides what to keep.
+ */
+async function streamLines(file, onHeader, onLine, onProgress) {
   const reader = file.stream().getReader();
   const decoder = new TextDecoder("utf-8");
   let buffer = "";
   let headers = null;
-  const rows = [];
+  let lineCount = 0;
   let bytesRead = 0;
 
   while (true) {
@@ -56,22 +60,29 @@ async function streamParseFile(file, onProgress) {
 
       if (!headers) {
         headers = trimmed.split("\t").map((h) => h.trim().toLowerCase());
+        onHeader(headers);
         continue;
       }
 
-      rows.push(trimmed.split("\t").map((v) => v.trim()));
+      lineCount++;
+      const cols = trimmed.split("\t").map((v) => v.trim());
+      onLine(cols);
     }
 
-    if (onProgress) {
-      onProgress(bytesRead, file.size, rows.length, headers);
+    if (onProgress && lineCount % 50000 === 0) {
+      onProgress(bytesRead, file.size, lineCount);
+      // Yield to UI thread every 50k lines
+      await new Promise((r) => setTimeout(r, 0));
     }
   }
 
+  // Process remaining buffer
   if (buffer.trim() && headers) {
-    rows.push(buffer.trim().split("\t").map((v) => v.trim()));
+    const cols = buffer.trim().split("\t").map((v) => v.trim());
+    onLine(cols);
   }
 
-  return { headers, rows };
+  return { headers, lineCount };
 }
 
 export default function Upload({ onDone }) {
@@ -97,120 +108,142 @@ export default function Upload({ onDone }) {
 
     setProcessing(true);
     setDebug("");
-    setStatus(
-      `Reading real_acct file (${(acctFile.size / 1024 / 1024).toFixed(0)} MB)...`,
-    );
+    setProgress(0);
 
     try {
-      // Stream-parse real_acct
-      const acctData = await streamParseFile(acctFile, (bytes, total, rowCount, headers) => {
-        const pct = Math.round((bytes / total) * 50);
-        setProgress(pct);
-        if (rowCount % 100000 === 0 && rowCount > 0) {
-          setStatus(`Reading real_acct: ${rowCount} rows (${Math.round((bytes / total) * 100)}%)...`);
-        }
-      });
+      // --- Pass 1: Stream real_acct, filter in place, only keep matches ---
+      setStatus(
+        `Reading real_acct (${(acctFile.size / 1024 / 1024).toFixed(0)} MB) -- filtering as we go...`,
+      );
 
-      if (!acctData.headers || acctData.rows.length === 0) {
-        setDebug(
-          `Headers found: ${acctData.headers ? acctData.headers.join(", ") : "none"}. Rows: ${acctData.rows.length}`,
+      let acctIdx = -1;
+      let classIdx = -1;
+      let yrIdx = -1;
+      let addrIdx = -1;
+      let valIdx = -1;
+
+      // Store only filtered rows as lightweight objects
+      const filtered = [];
+      const filteredAccts = new Set();
+
+      const acctResult = await streamLines(
+        acctFile,
+        (headers) => {
+          acctIdx = findColIndex(headers, ["acct", "account", "acct_number"]);
+          classIdx = findColIndex(headers, ["state_class", "state_cd", "class_cd", "impr_state_cd"]);
+          yrIdx = findColIndex(headers, ["yr_built", "year_built", "yr_impr"]);
+          addrIdx = findColIndex(headers, ["site_addr", "property_address", "address", "situs"]);
+          valIdx = findColIndex(headers, ["tot_appr_val", "appraised_value", "total_appraised_value", "appr_val"]);
+          if (acctIdx === -1) acctIdx = 0;
+          setDebug(`Columns: ${headers.join(", ")}`);
+        },
+        (cols) => {
+          // Filter immediately -- discard non-matching rows
+          if (classIdx !== -1) {
+            const cls = (cols[classIdx] || "").toUpperCase();
+            if (!MULTIFAMILY_CODES.has(cls)) return;
+          }
+          if (yrIdx !== -1) {
+            const yr = parseInt(cols[yrIdx]);
+            if (isNaN(yr) || yr < 1980 || yr > 2005) return;
+          }
+
+          const acct = cols[acctIdx] || "";
+          filtered.push({
+            acct_number: acct,
+            property_address: addrIdx !== -1 ? cols[addrIdx] || "" : "",
+            year_built: yrIdx !== -1 ? parseInt(cols[yrIdx]) || null : null,
+            appraised_value: valIdx !== -1 ? parseFloat(cols[valIdx]) || null : null,
+          });
+          filteredAccts.add(acct);
+        },
+        (bytes, total, lines) => {
+          const pct = Math.round((bytes / total) * 40);
+          setProgress(pct);
+          setStatus(
+            `Reading real_acct: ${lines.toLocaleString()} rows scanned, ${filtered.length} matches...`,
+          );
+        },
+      );
+
+      if (filtered.length === 0) {
+        setStatus(
+          `Error: No multifamily properties found (1980-2005). Scanned ${acctResult.lineCount.toLocaleString()} rows.`,
         );
-        setStatus("Error: No data found in real_acct file.");
         setProcessing(false);
         return;
       }
 
-      const h = acctData.headers;
-      setDebug(`Columns: ${h.join(", ")}`);
-
-      const acctIdx = findColIndex(h, ["acct", "account", "acct_number"]);
-      const classIdx = findColIndex(h, ["state_class", "state_cd", "class_cd", "impr_state_cd"]);
-      const yrIdx = findColIndex(h, ["yr_built", "year_built", "yr_impr"]);
-      const addrIdx = findColIndex(h, ["site_addr", "property_address", "address", "situs"]);
-      const valIdx = findColIndex(h, ["tot_appr_val", "appraised_value", "total_appraised_value", "appr_val"]);
-
-      const realAcctIdx = acctIdx !== -1 ? acctIdx : 0;
-
       setStatus(
-        `Loaded ${acctData.rows.length} records. Filtering multifamily + year 1980-2005...`,
+        `Found ${filtered.length} properties. Reading owners (${(ownersFile.size / 1024 / 1024).toFixed(0)} MB)...`,
       );
+      setProgress(45);
 
-      // Filter in one pass
-      const filtered = [];
-      for (const row of acctData.rows) {
-        if (classIdx !== -1) {
-          const cls = (row[classIdx] || "").toUpperCase();
-          if (!MULTIFAMILY_CODES.has(cls)) continue;
-        }
-        if (yrIdx !== -1) {
-          const yr = parseInt(row[yrIdx]);
-          if (isNaN(yr) || yr < 1980 || yr > 2005) continue;
-        }
-        filtered.push(row);
-      }
-
-      setStatus(
-        `Found ${filtered.length} matching properties. Reading owners file...`,
-      );
-      setProgress(55);
-
-      // Stream-parse owners
-      const ownersData = await streamParseFile(ownersFile, (bytes, total) => {
-        const pct = 55 + Math.round((bytes / total) * 15);
-        setProgress(pct);
-      });
-
-      const oh = ownersData.headers;
-      const ownerAcctIdx = findColIndex(oh, ["acct", "account", "acct_number"]);
-      const nameIdx = findColIndex(oh, ["owner_name", "name", "owner"]);
-      const mailIdx = findColIndex(oh, ["mail_addr", "mailing_address", "mail_address", "tnt_mail_adr"]);
-      const mailStateIdx = findColIndex(oh, ["mail_state", "state", "mail_st"]);
-
-      const realOwnerAcctIdx = ownerAcctIdx !== -1 ? ownerAcctIdx : 0;
-
-      // Build owner lookup
+      // --- Pass 2: Stream owners, only keep those matching filtered accts ---
+      let ownerNameIdx = -1;
+      let ownerMailIdx = -1;
+      let ownerMailStateIdx = -1;
+      let ownerAcctIdx = -1;
       const ownerMap = {};
-      for (const row of ownersData.rows) {
-        const key = row[realOwnerAcctIdx];
-        if (key && !ownerMap[key]) ownerMap[key] = row;
-      }
 
-      setStatus(`Joined ${Object.keys(ownerMap).length} owners. Scoring leads...`);
-      setProgress(75);
+      await streamLines(
+        ownersFile,
+        (headers) => {
+          ownerAcctIdx = findColIndex(headers, ["acct", "account", "acct_number"]);
+          ownerNameIdx = findColIndex(headers, ["owner_name", "name", "owner"]);
+          ownerMailIdx = findColIndex(headers, ["mail_addr", "mailing_address", "mail_address", "tnt_mail_adr"]);
+          ownerMailStateIdx = findColIndex(headers, ["mail_state", "state", "mail_st"]);
+          if (ownerAcctIdx === -1) ownerAcctIdx = 0;
+        },
+        (cols) => {
+          const acct = cols[ownerAcctIdx] || "";
+          // Only store owners that match our filtered properties
+          if (filteredAccts.has(acct) && !ownerMap[acct]) {
+            ownerMap[acct] = {
+              name: ownerNameIdx !== -1 ? cols[ownerNameIdx] || "" : "",
+              mail: ownerMailIdx !== -1 ? cols[ownerMailIdx] || "" : "",
+              state: ownerMailStateIdx !== -1 ? (cols[ownerMailStateIdx] || "").toUpperCase().trim() : "",
+            };
+          }
+        },
+        (bytes, total, lines) => {
+          const pct = 45 + Math.round((bytes / total) * 20);
+          setProgress(pct);
+          setStatus(
+            `Reading owners: ${lines.toLocaleString()} rows, ${Object.keys(ownerMap).length} matched...`,
+          );
+        },
+      );
 
-      // Build and score leads
-      const leads = [];
-      for (const row of filtered) {
-        const acct = row[realAcctIdx] || "";
-        const owner = ownerMap[acct] || [];
-        const mailAddr = mailIdx !== -1 ? owner[mailIdx] || "" : "";
-        const ownerState =
-          mailStateIdx !== -1
-            ? (owner[mailStateIdx] || "").toUpperCase().trim()
-            : extractState(mailAddr);
+      setStatus(`Scoring ${filtered.length} leads...`);
+      setProgress(70);
+
+      // --- Score leads ---
+      const leads = filtered.map((prop) => {
+        const owner = ownerMap[prop.acct_number] || {};
+        const ownerState = owner.state || extractState(owner.mail || "");
         const outOfState = ownerState !== "" && ownerState !== "TX";
-        const yearBuilt = yrIdx !== -1 ? parseInt(row[yrIdx]) || null : null;
-        const appraisedValue = valIdx !== -1 ? parseFloat(row[valIdx]) || null : null;
 
         const lead = {
-          acct_number: acct,
-          property_address: addrIdx !== -1 ? row[addrIdx] || "" : "",
-          owner_name: nameIdx !== -1 ? owner[nameIdx] || "" : "",
-          owner_mail_address: mailAddr,
-          year_built: yearBuilt,
-          appraised_value: appraisedValue,
+          acct_number: prop.acct_number,
+          property_address: prop.property_address,
+          owner_name: owner.name || "",
+          owner_mail_address: owner.mail || "",
+          year_built: prop.year_built,
+          appraised_value: prop.appraised_value,
           unit_count: null,
           out_of_state_owner: outOfState,
           permit_flag: false,
           lead_score: 0,
         };
         lead.lead_score = scoreLead(lead);
-        leads.push(lead);
-      }
+        return lead;
+      });
 
       setStatus(`Uploading ${leads.length} leads to Supabase...`);
+      setProgress(75);
 
-      // Upsert in batches
+      // --- Upsert in batches ---
       const batchSize = 500;
       let uploaded = 0;
 
@@ -226,7 +259,7 @@ export default function Upload({ onDone }) {
           return;
         }
         uploaded += batch.length;
-        const pct = 80 + Math.round((uploaded / leads.length) * 20);
+        const pct = 75 + Math.round((uploaded / leads.length) * 25);
         setProgress(pct);
         setStatus(`Uploaded ${uploaded}/${leads.length} leads...`);
       }
@@ -237,7 +270,7 @@ export default function Upload({ onDone }) {
         .map((l) => `${l.property_address} (${l.lead_score})`)
         .join(", ");
 
-      setStatus(`Done! ${uploaded} leads uploaded.`);
+      setStatus(`Done! ${uploaded} leads uploaded to Supabase.`);
       setDebug(`Top leads: ${topLeads}`);
       setProgress(100);
       setProcessing(false);
@@ -254,9 +287,8 @@ export default function Upload({ onDone }) {
         Upload HCAD Data
       </h1>
       <p className="text-sm text-gray-500 mb-6">
-        Upload the extracted HCAD text files to process and load leads into the
-        database. Files are processed in your browser and sent directly to
-        Supabase. Large files are streamed to avoid memory issues.
+        Upload the extracted HCAD text files. Files are streamed and filtered in
+        your browser -- only matching leads are kept in memory.
       </p>
 
       <form onSubmit={handleUpload} className="space-y-4">
