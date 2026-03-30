@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { supabase } from "../lib/supabase";
+import { supabase, supabaseConfigured } from "../lib/supabase";
 import { ScoreBadge } from "./StatusBadge";
 
 const STATUSES = ["new", "contacted", "follow_up", "won", "lost"];
@@ -9,6 +9,7 @@ export default function LeadTable({ leads, onUpdate }) {
   const [notesValue, setNotesValue] = useState("");
 
   const handleStatusChange = async (id, newStatus) => {
+    if (!supabaseConfigured) return;
     await supabase.from("leads").update({ status: newStatus }).eq("id", id);
     onUpdate();
   };
@@ -19,6 +20,7 @@ export default function LeadTable({ leads, onUpdate }) {
   };
 
   const saveNotes = async (id) => {
+    if (!supabaseConfigured) return;
     await supabase.from("leads").update({ notes: notesValue }).eq("id", id);
     setEditingNotes(null);
     onUpdate();
