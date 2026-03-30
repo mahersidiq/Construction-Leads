@@ -24,6 +24,105 @@ function formatCurrency(val) {
   return "$" + Number(val).toLocaleString("en-US", { maximumFractionDigits: 0 });
 }
 
+function googleSearchUrl(query) {
+  return `https://www.google.com/search?q=${encodeURIComponent(query)}`;
+}
+
+function hcadUrl(acct) {
+  if (!acct) return null;
+  return `https://public.hcad.org/records/details.asp?cession=a&searchval=${encodeURIComponent(acct)}`;
+}
+
+function txSosUrl(name) {
+  if (!name) return null;
+  return `https://mycpa.cpa.state.tx.us/coa/coaSearchBtn?search_term=${encodeURIComponent(name)}&search_type=ALL`;
+}
+
+function OwnerLookup({ lead }) {
+  const [open, setOpen] = useState(false);
+  const name = lead.owner_name || "";
+  const addr = lead.property_address || "";
+  const acct = lead.acct_number || "";
+  const isLLC = /\b(LLC|LP|LTD|INC|CORP|TRUST|PARTNERS)\b/i.test(name);
+
+  return (
+    <div className="relative">
+      <button
+        onClick={() => setOpen(!open)}
+        className="text-xs px-2 py-1 bg-blue-50 text-blue-700 rounded hover:bg-blue-100 font-medium whitespace-nowrap"
+      >
+        Lookup
+      </button>
+      {open && (
+        <>
+          <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
+          <div className="absolute right-0 top-8 z-20 bg-white rounded-lg shadow-lg border border-gray-200 p-3 w-56">
+            <p className="text-xs font-medium text-gray-500 mb-2 uppercase">Research Links</p>
+            <div className="space-y-1.5">
+              <a
+                href={googleSearchUrl(`"${name}" Houston TX`)}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-2 text-sm text-blue-600 hover:text-blue-800 hover:bg-blue-50 rounded px-2 py-1"
+              >
+                <span>🔍</span> Google Owner
+              </a>
+              <a
+                href={googleSearchUrl(`"${name}" phone email contact`)}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-2 text-sm text-blue-600 hover:text-blue-800 hover:bg-blue-50 rounded px-2 py-1"
+              >
+                <span>📞</span> Find Contact Info
+              </a>
+              {isLLC && (
+                <a
+                  href={txSosUrl(name)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center gap-2 text-sm text-blue-600 hover:text-blue-800 hover:bg-blue-50 rounded px-2 py-1"
+                >
+                  <span>🏛️</span> TX Secretary of State
+                </a>
+              )}
+              {acct && (
+                <a
+                  href={hcadUrl(acct)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center gap-2 text-sm text-blue-600 hover:text-blue-800 hover:bg-blue-50 rounded px-2 py-1"
+                >
+                  <span>🏢</span> HCAD Property Record
+                </a>
+              )}
+              <a
+                href={googleSearchUrl(`${addr} apartments`)}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-2 text-sm text-blue-600 hover:text-blue-800 hover:bg-blue-50 rounded px-2 py-1"
+              >
+                <span>📍</span> Google Maps / Property
+              </a>
+              <a
+                href={googleSearchUrl(`"${name}" site:linkedin.com`)}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-2 text-sm text-blue-600 hover:text-blue-800 hover:bg-blue-50 rounded px-2 py-1"
+              >
+                <span>💼</span> LinkedIn
+              </a>
+            </div>
+            <hr className="my-2" />
+            <p className="text-[10px] text-gray-400">
+              For bulk phone/email, use a skip tracing service like BatchSkipTracing or PropStream
+            </p>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 export default function LeadTable({ leads, onUpdate, sortCol, sortAsc, onSort }) {
   const [editingNotes, setEditingNotes] = useState(null);
   const [notesValue, setNotesValue] = useState("");
@@ -80,6 +179,9 @@ export default function LeadTable({ leads, onUpdate, sortCol, sortAsc, onSort })
               </th>
             ))}
             <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+              Lookup
+            </th>
+            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
               Status
             </th>
             <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
@@ -116,6 +218,9 @@ export default function LeadTable({ leads, onUpdate, sortCol, sortAsc, onSort })
                 ) : (
                   <span className="text-gray-400">--</span>
                 )}
+              </td>
+              <td className="px-4 py-3">
+                <OwnerLookup lead={lead} />
               </td>
               <td className="px-4 py-3">
                 <select
