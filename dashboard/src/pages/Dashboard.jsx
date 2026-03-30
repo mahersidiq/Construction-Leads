@@ -9,6 +9,11 @@ const DEFAULT_FILTERS = {
   minScore: "",
   yearFrom: "",
   yearTo: "",
+  minValue: "",
+  maxValue: "",
+  addressSearch: "",
+  ownerSearch: "",
+  zipCode: "",
   permitOnly: false,
   outOfStateOnly: false,
 };
@@ -18,6 +23,8 @@ export default function Dashboard({ onLogout, onUpload }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [filters, setFilters] = useState(DEFAULT_FILTERS);
+  const [sortCol, setSortCol] = useState("lead_score");
+  const [sortAsc, setSortAsc] = useState(false);
 
   const fetchLeads = useCallback(async () => {
     if (!supabaseConfigured) {
@@ -44,18 +51,58 @@ export default function Dashboard({ onLogout, onUpload }) {
     fetchLeads();
   }, [fetchLeads]);
 
-  const filteredLeads = allLeads.filter((lead) => {
-    if (filters.status && lead.status !== filters.status) return false;
-    if (filters.minScore && lead.lead_score < Number(filters.minScore))
-      return false;
-    if (filters.yearFrom && lead.year_built < Number(filters.yearFrom))
-      return false;
-    if (filters.yearTo && lead.year_built > Number(filters.yearTo))
-      return false;
-    if (filters.permitOnly && !lead.permit_flag) return false;
-    if (filters.outOfStateOnly && !lead.out_of_state_owner) return false;
-    return true;
-  });
+  const handleSort = (col) => {
+    if (sortCol === col) {
+      setSortAsc(!sortAsc);
+    } else {
+      setSortCol(col);
+      setSortAsc(col === "property_address" || col === "owner_name");
+    }
+  };
+
+  const filteredLeads = allLeads
+    .filter((lead) => {
+      if (filters.status && lead.status !== filters.status) return false;
+      if (filters.minScore && lead.lead_score < Number(filters.minScore))
+        return false;
+      if (filters.yearFrom && lead.year_built < Number(filters.yearFrom))
+        return false;
+      if (filters.yearTo && lead.year_built > Number(filters.yearTo))
+        return false;
+      if (filters.minValue && (lead.appraised_value || 0) < Number(filters.minValue))
+        return false;
+      if (filters.maxValue && (lead.appraised_value || 0) > Number(filters.maxValue))
+        return false;
+      if (filters.addressSearch) {
+        const search = filters.addressSearch.toUpperCase();
+        if (!(lead.property_address || "").toUpperCase().includes(search))
+          return false;
+      }
+      if (filters.ownerSearch) {
+        const search = filters.ownerSearch.toUpperCase();
+        if (!(lead.owner_name || "").toUpperCase().includes(search))
+          return false;
+      }
+      if (filters.zipCode) {
+        if (!(lead.property_address || "").includes(filters.zipCode))
+          return false;
+      }
+      if (filters.permitOnly && !lead.permit_flag) return false;
+      if (filters.outOfStateOnly && !lead.out_of_state_owner) return false;
+      return true;
+    })
+    .sort((a, b) => {
+      let aVal = a[sortCol];
+      let bVal = b[sortCol];
+      if (aVal == null) aVal = "";
+      if (bVal == null) bVal = "";
+      if (typeof aVal === "string") {
+        return sortAsc
+          ? aVal.localeCompare(bVal)
+          : bVal.localeCompare(aVal);
+      }
+      return sortAsc ? aVal - bVal : bVal - aVal;
+    });
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -68,6 +115,9 @@ export default function Dashboard({ onLogout, onUpload }) {
             <p className="text-xs text-gray-500">Saadi Construction Group</p>
           </div>
           <div className="flex items-center gap-4">
+            <span className="text-xs text-gray-400">
+              {allLeads.length} total &middot; {filteredLeads.length} shown
+            </span>
             {onUpload && (
               <button
                 onClick={onUpload}
@@ -103,7 +153,13 @@ export default function Dashboard({ onLogout, onUpload }) {
               Loading leads...
             </div>
           ) : (
-            <LeadTable leads={filteredLeads} onUpdate={fetchLeads} />
+            <LeadTable
+              leads={filteredLeads}
+              onUpdate={fetchLeads}
+              sortCol={sortCol}
+              sortAsc={sortAsc}
+              onSort={handleSort}
+            />
           )}
         </div>
       </main>
