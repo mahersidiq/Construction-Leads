@@ -17,8 +17,16 @@ HCAD_BASE_URL = "https://pdata.hcad.org/download"
 REAL_ACCT_FILE = "Real_acct_owner/real_acct.txt"
 OWNER_FILE = "Real_acct_owner/owner.txt"
 BUILDING_RES_FILE = "building_res.txt"
-DOWNLOAD_URL = f"{HCAD_BASE_URL}/2024/Real_acct_owner.zip"
-BUILDING_RES_URL = f"{HCAD_BASE_URL}/2024/building_res.zip"
+
+# Try multiple years in case the latest isn't available yet
+YEARS_TO_TRY = ["2025", "2024", "2023"]
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5",
+    "Referer": "https://hcad.org/pdata/pdata-property-downloads.html",
+}
 
 # Multifamily state class codes
 MULTIFAMILY_CODES = set()
@@ -29,11 +37,30 @@ for prefix, end in [("A", 9), ("B", 4), ("F", 4)]:
 OUTPUT_PATH = os.path.join(os.path.dirname(__file__), "hcad_filtered.csv")
 
 
-def download_and_extract(url: str, target_filename: str) -> pd.DataFrame:
+def download_and_extract(base_name: str, target_filename: str) -> pd.DataFrame:
     """Download a zip file from HCAD and extract a specific tab-delimited file."""
-    print(f"Downloading {url} ...")
-    resp = requests.get(url, timeout=300)
-    resp.raise_for_status()
+    resp = None
+    for year in YEARS_TO_TRY:
+        url = f"{HCAD_BASE_URL}/{year}/{base_name}"
+        print(f"Trying {url} ...")
+        try:
+            resp = requests.get(url, headers=HEADERS, timeout=300)
+            if resp.status_code == 200 and len(resp.content) > 1000:
+                print(f"  Success ({len(resp.content)} bytes)")
+                break
+            print(f"  Got status {resp.status_code} or too small, trying next year...")
+            resp = None
+        except requests.RequestException as e:
+            print(f"  Failed: {e}")
+            resp = None
+
+    if resp is None:
+        raise RuntimeError(
+            f"Could not download {base_name} from any year. "
+            "HCAD may be blocking automated downloads. "
+            "Download manually from https://hcad.org/pdata/pdata-property-downloads.html "
+            "and place the extracted files in the scripts/ directory."
+        )
 
     with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
         names = zf.namelist()
@@ -53,7 +80,7 @@ def download_and_extract(url: str, target_filename: str) -> pd.DataFrame:
 
 def load_real_acct() -> pd.DataFrame:
     """Download and parse the real_acct file."""
-    df = download_and_extract(DOWNLOAD_URL, "real_acct.txt")
+    df = download_and_extract("Real_acct_owner.zip", "real_acct.txt")
     # Normalize column names
     df.columns = df.columns.str.strip().str.lower()
     return df
@@ -61,14 +88,14 @@ def load_real_acct() -> pd.DataFrame:
 
 def load_owner() -> pd.DataFrame:
     """Download and parse the owner file."""
-    df = download_and_extract(DOWNLOAD_URL, "owner.txt")
+    df = download_and_extract("Real_acct_owner.zip", "owner.txt")
     df.columns = df.columns.str.strip().str.lower()
     return df
 
 
 def load_building_res() -> pd.DataFrame:
     """Download and parse the building_res file for unit counts."""
-    df = download_and_extract(BUILDING_RES_URL, "building_res.txt")
+    df = download_and_extract("building_res.zip", "building_res.txt")
     df.columns = df.columns.str.strip().str.lower()
     return df
 
