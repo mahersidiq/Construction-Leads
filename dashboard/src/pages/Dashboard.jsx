@@ -95,16 +95,19 @@ export default function Dashboard({ onLogout, onUpload }) {
       return true;
     })
     .sort((a, b) => {
-      let aVal = a[sortCol];
-      let bVal = b[sortCol];
-      if (aVal == null) aVal = "";
-      if (bVal == null) bVal = "";
-      if (typeof aVal === "string") {
-        return sortAsc
-          ? aVal.localeCompare(bVal)
-          : bVal.localeCompare(aVal);
+      const aVal = a[sortCol] ?? "";
+      const bVal = b[sortCol] ?? "";
+      const aStr = String(aVal);
+      const bStr = String(bVal);
+      let cmp;
+      if (typeof aVal === "number" && typeof bVal === "number") {
+        cmp = aVal - bVal;
+      } else if (typeof aVal === "boolean" || typeof bVal === "boolean") {
+        cmp = Number(aVal) - Number(bVal);
+      } else {
+        cmp = aStr.localeCompare(bStr);
       }
-      return sortAsc ? aVal - bVal : bVal - aVal;
+      return sortAsc ? cmp : -cmp;
     });
 
   return (
