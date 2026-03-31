@@ -63,7 +63,11 @@ function PhoneEnrichPanel({ onDone }) {
       }
 
       setResults(data);
-      setProgress(data.message);
+      if (data.error) {
+        setProgress(`API Error: ${data.error}`);
+      } else {
+        setProgress(data.message);
+      }
       if (data.enriched > 0 && onDone) onDone();
     } catch (err) {
       setProgress(`Error: ${err.message}`);
@@ -143,6 +147,7 @@ function PhoneEnrichPanel({ onDone }) {
                     <th className="px-3 py-1.5 text-left text-gray-500">Business</th>
                     <th className="px-3 py-1.5 text-left text-gray-500">Phone</th>
                     <th className="px-3 py-1.5 text-left text-gray-500">Website</th>
+                    <th className="px-3 py-1.5 text-left text-gray-500">Status</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
@@ -154,6 +159,7 @@ function PhoneEnrichPanel({ onDone }) {
                       <td className="px-3 py-1.5 max-w-[150px] truncate">
                         {r.website ? <a href={r.website} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">{r.website}</a> : "--"}
                       </td>
+                      <td className="px-3 py-1.5 max-w-[200px] truncate text-red-500">{r.error || "OK"}</td>
                     </tr>
                   ))}
                 </tbody>
