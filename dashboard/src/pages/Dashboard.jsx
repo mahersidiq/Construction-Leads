@@ -22,7 +22,8 @@ const DEFAULT_FILTERS = {
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || "";
 
 function PhoneEnrichPanel({ onDone }) {
-  const [apiKey, setApiKey] = useState(() => localStorage.getItem("google_places_key") || "");
+  const envKey = import.meta.env.VITE_GOOGLE_PLACES_KEY || "";
+  const [apiKey, setApiKey] = useState(() => localStorage.getItem("google_places_key") || envKey);
   const [batchSize, setBatchSize] = useState(25);
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState("");

@@ -13,5 +13,8 @@ export default defineConfig({
     "import.meta.env.VITE_APP_PASSWORD": JSON.stringify(
       process.env.VITE_APP_PASSWORD || process.env.APP_PASSWORD || "",
     ),
+    "import.meta.env.VITE_GOOGLE_PLACES_KEY": JSON.stringify(
+      process.env.VITE_GOOGLE_PLACES_KEY || process.env.GOOGLE_PLACES || "",
+    ),
   },
 });
