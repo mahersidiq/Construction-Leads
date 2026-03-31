@@ -194,7 +194,7 @@ function EditableCell({ value, leadId, field, onUpdate }) {
         onKeyDown={(e) => { if (e.key === "Enter") save(); if (e.key === "Escape") setEditing(false); }}
         className="w-full text-xs border border-gray-300 rounded px-1.5 py-1 focus:outline-none focus:ring-1 focus:ring-blue-500"
         autoFocus
-        placeholder={field === "phone" ? "555-123-4567" : "email@example.com"}
+        placeholder={field === "phone" ? "555-123-4567" : "https://example.com"}
       />
     );
   }
@@ -209,7 +209,7 @@ function EditableCell({ value, leadId, field, onUpdate }) {
         field === "phone" ? (
           <a href={`tel:${value}`} onClick={(e) => e.stopPropagation()} className="text-blue-600 hover:underline">{value}</a>
         ) : (
-          <a href={`mailto:${value}`} onClick={(e) => e.stopPropagation()} className="text-blue-600 hover:underline">{value}</a>
+          <a href={value.startsWith("http") ? value : `https://${value}`} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()} className="text-blue-600 hover:underline truncate">{value}</a>
         )
       ) : (
         <span className="text-gray-300 italic">+ add</span>
@@ -274,7 +274,7 @@ export default function LeadTable({ leads, onUpdate, sortCol, sortAsc, onSort })
               </th>
             ))}
             <th className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Phone</th>
-            <th className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Email</th>
+            <th className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Website</th>
             <th className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Lookup</th>
             <th className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
             <th className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Notes</th>
