@@ -77,20 +77,39 @@ function StatCard({ label, value, color }) {
 }
 
 // ---------------------------------------------------------------------------
-// Houston Code Violations → Commercial Leads Pipeline (runs in the browser)
+// Houston Permits → Commercial Leads Pipeline (runs in the browser)
 // ---------------------------------------------------------------------------
 
 const CKAN_URL = "https://data.houstontx.gov/api/3/action/datastore_search";
-const VIOLATIONS_RESOURCE_ID = "84a171f2-d601-4c79-bc4d-9733b378c663";
 const PERMIT_RESOURCE_ID = "80b03984-0e31-41ff-937b-35b686755bf9";
 const CKAN_PAGE_SIZE = 32000;
 
-// Only keep violations from the last N days
+// Only keep permits from the last N days
 const RECENT_DAYS = 365;
 
-// Violation action types that signal construction opportunity
-const HIGH_SEVERITY_ACTIONS = ["STOP WORK ORDER", "FAILED INSPECTION", "CONDEMNED", "DEMOLITION", "UNSAFE"];
-const MEDIUM_SEVERITY_ACTIONS = ["VIOLATION", "CITATION", "NON-COMPLIANCE", "NOTICE", "WARNING"];
+// Permit types that signal commercial construction opportunity
+const COMMERCIAL_PERMIT_PATTERNS = [
+  [/STOP\s*WORK/i, "Stop Work Order"],
+  [/FAILED\s*INSPECTION/i, "Failed Inspection"],
+  [/CODE\s*VIOLATION/i, "Code Violation"],
+  [/CONDEMNED/i, "Condemned"],
+  [/UNSAFE/i, "Unsafe Structure"],
+  [/TENANT\s*IMPROVEMENT/i, "Tenant Improvement"],
+  [/\bTI\b/, "Tenant Improvement"],
+  [/CHANGE\s*OF\s*OCCUPANCY/i, "Change of Occupancy"],
+  [/CHANGE\s*OF\s*USE/i, "Change of Use"],
+  [/CERTIFICATE\s*OF\s*OCCUPANCY/i, "Certificate of Occupancy"],
+  [/COMMERCIAL/i, "Commercial"],
+  [/RENOVATION/i, "Renovation"],
+  [/REMODEL/i, "Remodel"],
+  [/ALTERATION/i, "Alteration"],
+  [/REPAIR/i, "Repair"],
+];
+
+const HIGH_SEVERITY = new Set([
+  "Stop Work Order", "Failed Inspection", "Code Violation",
+  "Condemned", "Unsafe Structure",
+]);
 
 function findCol(record, candidates) {
   for (const c of candidates) {
@@ -119,30 +138,31 @@ function normalizeAddr(raw) {
   return addr.replace(/\s+/g, " ").trim();
 }
 
-function classifySeverity(actionText) {
-  if (!actionText) return { level: "general", score: 5 };
-  const upper = String(actionText).toUpperCase();
-  for (const kw of HIGH_SEVERITY_ACTIONS) {
-    if (upper.includes(kw)) return { level: "high", score: 20 };
+function classifyPermit(text) {
+  if (!text) return null;
+  const str = String(text);
+  for (const [pattern, label] of COMMERCIAL_PERMIT_PATTERNS) {
+    if (pattern.test(str)) return label;
   }
-  for (const kw of MEDIUM_SEVERITY_ACTIONS) {
-    if (upper.includes(kw)) return { level: "medium", score: 10 };
-  }
-  return { level: "general", score: 5 };
+  return null;
 }
 
-function scoreViolationLead(lead) {
+function scorePermitLead(lead) {
   let s = 0;
-  s += lead._severity_score || 5;
-  if (lead.permit_flag) s += 20;
-  // Multiple violations = more urgent
-  const count = lead._violation_count || 1;
+  // Severity of worst permit type
+  if (HIGH_SEVERITY.has(lead._worst_type)) s += 25;
+  else s += 10;
+  // Multiple permits at same address = more activity
+  const count = lead._permit_count || 1;
   if (count >= 5) s += 25;
-  else if (count >= 3) s += 15;
+  else if (count >= 3) s += 20;
   else if (count >= 2) s += 10;
-  // Recency bonus — violations in last 90 days are hotter
-  if (lead._most_recent_days != null && lead._most_recent_days <= 90) s += 15;
+  // Recency: permits in last 90 days are hotter
+  if (lead._most_recent_days != null && lead._most_recent_days <= 90) s += 20;
   else if (lead._most_recent_days != null && lead._most_recent_days <= 180) s += 10;
+  // Has multiple different permit types = complex situation
+  if (lead._type_count >= 3) s += 15;
+  else if (lead._type_count >= 2) s += 10;
   return Math.min(s, 100);
 }
 
@@ -188,80 +208,87 @@ function DataFetchPanel({ onDone }) {
     setLog([]);
 
     try {
-      // --- Step 1: Fetch code violation data ---
-      setStatus("Fetching Houston code enforcement violations...");
-      addLog("Querying Violations CKAN API...");
+      // --- Step 1: Fetch permit data ---
+      setStatus("Fetching Houston permit data...");
+      addLog("Querying Permits CKAN API (resource 80b03984)...");
 
-      const violationsRaw = await fetchCkanPages(
-        VIOLATIONS_RESOURCE_ID,
+      const permitRaw = await fetchCkanPages(
+        PERMIT_RESOURCE_ID,
         (count) => {
-          setStatus(`Fetching violations: ${count.toLocaleString()} records...`);
-          setProgress(5 + Math.min(25, Math.round(count / 5000)));
+          setStatus(`Fetching permits: ${count.toLocaleString()} records...`);
+          setProgress(5 + Math.min(35, Math.round(count / 2000)));
         },
       );
-      addLog(`Fetched ${violationsRaw.length.toLocaleString()} total violation records`);
-      setProgress(30);
+      addLog(`Fetched ${permitRaw.length.toLocaleString()} total permit records`);
+      setProgress(40);
 
-      if (violationsRaw.length === 0) {
-        setStatus("Error: No data returned from Violations API.");
+      if (permitRaw.length === 0) {
+        setStatus("Error: No data returned from Permits API.");
         setRunning(false);
         return;
       }
 
-      // Discover columns from first record
-      const sample = violationsRaw[0];
+      // Discover columns
+      const sample = permitRaw[0];
       const allKeys = Object.keys(sample);
       addLog(`Columns (${allKeys.length}): ${allKeys.join(", ")}`);
-      console.log("Violation sample record:", sample);
+      console.log("Permit sample record:", sample);
 
-      // Find key columns — try common code enforcement column names
       const addrCol = findCol(sample, [
-        "Address", "address", "SITE_ADDRESS", "Site_Address", "site_address",
-        "Property_Address", "property_address", "Location", "location",
-        "LOCATION", "Street_Address", "street_address", "PROJECT_ADDRESS",
+        "Address", "address", "Project Address", "project_address",
+        "Street_Address", "street_address", "SITE_ADDRESS", "Location",
+      ]);
+      const typeCol = findCol(sample, [
+        "Permit Type", "permit_type", "Type", "type",
+        "Permit_Type", "Category",
+      ]);
+      const descCol = findCol(sample, [
+        "Description", "description", "Project Description",
+        "permit_description", "work_description", "Scope of Work",
       ]);
       const dateCol = findCol(sample, [
-        "Action_Date", "action_date", "Date", "date", "Violation_Date",
-        "violation_date", "Created_Date", "created_date", "CREATED_DATE",
-        "Open_Date", "open_date", "Report_Date",
+        "Issue Date", "issue_date", "Issued Date", "issued_date",
+        "Date", "date", "permit_date", "Date Issued",
       ]);
-      const actionCol = findCol(sample, [
-        "Action", "action", "Action_Type", "action_type", "Violation_Type",
-        "violation_type", "Type", "type", "Category", "category",
-      ]);
-      const actionTypeCol = findCol(sample, [
-        "Action_Type", "action_type", "Action_Level", "action_level",
-        "Violation_Type", "violation_type", "ViolationSubId",
-      ]);
-      const commentsCol = findCol(sample, [
-        "Comments", "comments", "Description", "description", "Narrative",
-        "narrative", "Details", "details",
+      const statusCol = findCol(sample, [
+        "Status", "status", "Permit Status", "permit_status",
       ]);
       const idCol = findCol(sample, [
-        "Sr_Request_Num", "sr_request_num", "Case_Number", "case_number",
-        "NPPRJID", "Record_ID", "record_id", "_id",
+        "Receipt No", "receipt_no", "Permit Number", "permit_number",
+        "Project No", "project_no", "Record ID", "_id",
       ]);
 
-      addLog(`Mapped — addr: ${addrCol || "NONE"}, date: ${dateCol || "NONE"}, action: ${actionCol || "NONE"}, type: ${actionTypeCol || "NONE"}, comments: ${commentsCol || "NONE"}, id: ${idCol || "_id"}`);
+      addLog(`Mapped — addr: ${addrCol || "NONE"}, type: ${typeCol || "NONE"}, desc: ${descCol || "NONE"}, date: ${dateCol || "NONE"}, status: ${statusCol || "NONE"}, id: ${idCol || "_id"}`);
 
       if (!addrCol) {
-        // No address column found — log all columns and sample for debugging
-        setStatus("Error: No address column found in violation data. See log for all available columns.");
+        setStatus("Error: No address column found in permit data.");
         addLog(`First record: ${JSON.stringify(sample).slice(0, 1000)}`);
         setRunning(false);
         return;
       }
 
-      // --- Step 2: Filter recent violations and group by address ---
-      setStatus("Filtering recent violations and grouping by address...");
+      // --- Step 2: Filter for commercial-relevant permits, recent only ---
+      setStatus("Filtering for commercial permits (last 12 months)...");
       const cutoff = new Date();
       cutoff.setTime(cutoff.getTime() - RECENT_DAYS * 24 * 60 * 60 * 1000);
 
       const addressMap = new Map();
-      let recentCount = 0;
+      let matchedCount = 0;
       let skippedOld = 0;
+      let skippedType = 0;
 
-      for (const rec of violationsRaw) {
+      for (const rec of permitRaw) {
+        // Classify permit type from type + description columns
+        const typeText = [typeCol, descCol, statusCol]
+          .filter(Boolean)
+          .map((c) => String(rec[c] || ""))
+          .join(" ");
+        const category = classifyPermit(typeText);
+        if (!category) {
+          skippedType++;
+          continue;
+        }
+
         // Recency filter
         if (dateCol) {
           const d = new Date(rec[dateCol]);
@@ -273,127 +300,93 @@ function DataFetchPanel({ onDone }) {
 
         const rawAddr = String(rec[addrCol] || "").trim();
         if (!rawAddr) continue;
-        recentCount++;
+        matchedCount++;
 
         const normAddr = normalizeAddr(rawAddr);
-        const actionText = [actionCol, actionTypeCol, commentsCol]
-          .filter(Boolean)
-          .map((c) => String(rec[c] || ""))
-          .join(" ");
-        const { level, score } = classifySeverity(actionText);
-        const violationDate = dateCol && rec[dateCol] ? new Date(rec[dateCol]) : null;
-        const caseId = idCol ? String(rec[idCol] || "") : "";
+        const permitDate = dateCol && rec[dateCol] ? new Date(rec[dateCol]) : null;
+        const permitId = idCol ? String(rec[idCol] || "") : "";
 
         const existing = addressMap.get(normAddr);
         if (existing) {
           existing.count++;
-          if (score > existing.severity_score) {
-            existing.severity_score = score;
-            existing.severity_level = level;
-            existing.worst_action = actionText.slice(0, 200);
+          existing.types.add(category);
+          if (HIGH_SEVERITY.has(category) && !HIGH_SEVERITY.has(existing.worst_type)) {
+            existing.worst_type = category;
           }
-          if (violationDate && (!existing.most_recent || violationDate > existing.most_recent)) {
-            existing.most_recent = violationDate;
+          if (permitDate && (!existing.most_recent || permitDate > existing.most_recent)) {
+            existing.most_recent = permitDate;
           }
-          if (caseId && !existing.case_ids.includes(caseId)) {
-            existing.case_ids.push(caseId);
-          }
+          if (permitId) existing.ids.push(permitId);
         } else {
           addressMap.set(normAddr, {
             raw_address: rawAddr,
             count: 1,
-            severity_score: score,
-            severity_level: level,
-            worst_action: actionText.slice(0, 200),
-            most_recent: violationDate,
-            case_ids: caseId ? [caseId] : [],
+            types: new Set([category]),
+            worst_type: category,
+            most_recent: permitDate,
+            ids: permitId ? [permitId] : [],
           });
         }
       }
 
-      addLog(`Recent violations (last ${RECENT_DAYS} days): ${recentCount.toLocaleString()} (skipped ${skippedOld.toLocaleString()} older)`);
-      addLog(`Unique addresses with violations: ${addressMap.size.toLocaleString()}`);
-      setProgress(45);
+      addLog(`Commercial permits (last ${RECENT_DAYS} days): ${matchedCount.toLocaleString()}`);
+      addLog(`Skipped: ${skippedType.toLocaleString()} non-commercial, ${skippedOld.toLocaleString()} older than cutoff`);
+      addLog(`Unique addresses: ${addressMap.size.toLocaleString()}`);
+      setProgress(65);
 
       if (addressMap.size === 0) {
-        setStatus("No recent violations found with valid addresses.");
+        setStatus("No recent commercial permits found. Try adjusting the recency filter.");
         setRunning(false);
         return;
       }
 
-      // --- Step 3: Fetch permits to enrich ---
-      setStatus("Fetching permit data to cross-reference...");
-      addLog("Querying Houston Permits CKAN API...");
-
-      const permitRaw = await fetchCkanPages(
-        PERMIT_RESOURCE_ID,
-        (count) => {
-          setStatus(`Fetching permits: ${count.toLocaleString()} records...`);
-          setProgress(45 + Math.min(15, Math.round(count / 5000)));
-        },
-      );
-      addLog(`Fetched ${permitRaw.length.toLocaleString()} permit records`);
-      setProgress(60);
-
-      // Build permit address set for cross-reference
-      const permitAddrs = new Set();
-      if (permitRaw.length > 0) {
-        const pSample = permitRaw[0];
-        const pAddrCol = findCol(pSample, ["Address", "address", "project_address", "street_address"]);
-        if (pAddrCol) {
-          for (const rec of permitRaw) {
-            const addr = normalizeAddr(rec[pAddrCol]);
-            if (addr) permitAddrs.add(addr);
-          }
-        }
-      }
-      addLog(`Permit addresses loaded: ${permitAddrs.size.toLocaleString()}`);
-      setProgress(70);
-
-      // --- Step 4: Build scored leads ---
+      // --- Step 3: Build scored leads ---
       setStatus("Scoring leads...");
       const leads = [];
       const now = new Date();
 
       for (const [normAddr, data] of addressMap) {
-        const hasPermit = permitAddrs.has(normAddr);
         const daysSince = data.most_recent
           ? Math.round((now - data.most_recent) / (1000 * 60 * 60 * 24))
           : null;
+        const typesArr = [...data.types];
+        const isHighPriority = typesArr.some((t) => HIGH_SEVERITY.has(t));
 
         const lead = {
-          acct_number: data.case_ids[0] || normAddr.replace(/\s+/g, "-").slice(0, 50),
+          acct_number: data.ids[0] || normAddr.replace(/\s+/g, "-").slice(0, 50),
           property_address: data.raw_address,
           owner_name: "",
           owner_mail_address: "",
           year_built: null,
           appraised_value: null,
-          property_type: data.severity_level === "high" ? "high-priority" : "violation",
+          property_type: isHighPriority ? "high-priority" : "violation",
           out_of_state_owner: false,
-          permit_flag: hasPermit,
-          permit_type: hasPermit ? "Active Permit" : data.worst_action.slice(0, 100),
-          permit_status: data.worst_action.slice(0, 100),
+          permit_flag: true,
+          permit_type: typesArr.join(", "),
+          permit_status: data.worst_type,
           permit_date: data.most_recent ? data.most_recent.toISOString().slice(0, 10) : null,
-          _severity_score: data.severity_score,
-          _violation_count: data.count,
+          _worst_type: data.worst_type,
+          _permit_count: data.count,
           _most_recent_days: daysSince,
+          _type_count: typesArr.length,
         };
-        lead.lead_score = scoreViolationLead(lead);
+        lead.lead_score = scorePermitLead(lead);
         leads.push(lead);
       }
 
-      // Clean internal fields before upsert
+      // Clean internal fields
       for (const lead of leads) {
-        delete lead._severity_score;
-        delete lead._violation_count;
+        delete lead._worst_type;
+        delete lead._permit_count;
         delete lead._most_recent_days;
+        delete lead._type_count;
       }
 
       leads.sort((a, b) => b.lead_score - a.lead_score);
       addLog(`Scored ${leads.length} leads. Top score: ${leads[0]?.lead_score}`);
       setProgress(75);
 
-      // --- Step 5: Upsert to Supabase ---
+      // --- Step 4: Upsert to Supabase ---
       setStatus(`Uploading ${leads.length} leads to Supabase...`);
       const batchSize = 500;
       let uploaded = 0;
@@ -413,9 +406,9 @@ function DataFetchPanel({ onDone }) {
         setStatus(`Uploaded ${uploaded}/${leads.length}...`);
       }
 
-      const top3 = leads.slice(0, 3).map((l) => `${l.property_address} (score ${l.lead_score})`).join("; ");
+      const top3 = leads.slice(0, 3).map((l) => `${l.property_address} (${l.lead_score})`).join("; ");
       addLog(`Top leads: ${top3}`);
-      setStatus(`Done! ${uploaded} violation-based leads scored and uploaded.`);
+      setStatus(`Done! ${uploaded} commercial leads scored and uploaded.`);
       setProgress(100);
       setRunning(false);
       if (onDone) onDone();
@@ -435,7 +428,7 @@ function DataFetchPanel({ onDone }) {
       >
         <div>
           <span className="font-medium text-gray-900">Fetch &amp; Score Commercial Leads</span>
-          <span className="text-xs text-gray-500 ml-2">Pull live violation data from Houston Open Data</span>
+          <span className="text-xs text-gray-500 ml-2">Pull live permit &amp; violation data from Houston Open Data</span>
         </div>
         <span className="text-gray-400">{open ? "\u25B2" : "\u25BC"}</span>
       </button>
@@ -443,9 +436,10 @@ function DataFetchPanel({ onDone }) {
       {open && (
         <div className="px-4 pb-4 border-t border-gray-100 pt-3 space-y-3">
           <p className="text-xs text-gray-500">
-            Pulls Houston code enforcement violations (last 12 months) + permit data from the city's CKAN API.
-            Groups violations by address, scores by severity and frequency,
-            cross-references with active permits, and uploads to Supabase.
+            Pulls Houston permit records from the city's CKAN API.
+            Filters for commercial-relevant permits (stop work orders, code violations, failed inspections,
+            tenant improvements, renovations) from the last 12 months.
+            Groups by address, scores by severity, frequency, and recency, then uploads to Supabase.
           </p>
 
           <button
