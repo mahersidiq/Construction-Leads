@@ -15,8 +15,8 @@ const STATUS_OPTIONS = [
 
 const PROPERTY_TYPE_OPTIONS = [
   { value: "", label: "All Types" },
-  { value: "hotel", label: "Hotel" },
-  { value: "commercial", label: "Commercial" },
+  { value: "high-priority", label: "High Priority" },
+  { value: "violation", label: "Violation" },
 ];
 
 const DEFAULT_FILTERS = {
@@ -57,9 +57,9 @@ function formatCurrency(val) {
 
 function PropertyTypeBadge({ type }) {
   if (!type) return <span className="text-gray-300">--</span>;
-  const colors = type === "hotel"
-    ? "bg-amber-100 text-amber-800"
-    : "bg-indigo-100 text-indigo-800";
+  const colors = type === "high-priority"
+    ? "bg-red-100 text-red-800"
+    : "bg-amber-100 text-amber-800";
   return (
     <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold capitalize ${colors}`}>
       {type}
@@ -77,26 +77,20 @@ function StatCard({ label, value, color }) {
 }
 
 // ---------------------------------------------------------------------------
-// HCAD + Permit API Data Fetch Pipeline (runs entirely in the browser)
+// Houston Code Violations → Commercial Leads Pipeline (runs in the browser)
 // ---------------------------------------------------------------------------
 
-const HCAD_CKAN_URL = "https://data.houstontx.gov/api/3/action/datastore_search";
-const HCAD_RESOURCE_ID = "84a171f2-d601-4c79-bc4d-9733b378c663";
+const CKAN_URL = "https://data.houstontx.gov/api/3/action/datastore_search";
+const VIOLATIONS_RESOURCE_ID = "84a171f2-d601-4c79-bc4d-9733b378c663";
 const PERMIT_RESOURCE_ID = "80b03984-0e31-41ff-937b-35b686755bf9";
 const CKAN_PAGE_SIZE = 32000;
 
-const HOTEL_KEYWORDS = ["HOTEL", "MOTEL", "INN", "LODGE", "SUITES", "EXTENDED STAY", "HOSPITALITY"];
+// Only keep violations from the last N days
+const RECENT_DAYS = 365;
 
-const COMMERCIAL_PERMIT_PATTERNS = [
-  [/TENANT\s*IMPROVEMENT/i, "Tenant Improvement"],
-  [/\bTI\b/i, "Tenant Improvement"],
-  [/CHANGE\s*OF\s*OCCUPANCY/i, "Change of Occupancy"],
-  [/CHANGE\s*OF\s*USE/i, "Change of Use"],
-  [/CERTIFICATE\s*OF\s*OCCUPANCY/i, "Certificate of Occupancy"],
-  [/CODE\s*VIOLATION/i, "Code Violation"],
-  [/FAILED\s*INSPECTION/i, "Failed Inspection"],
-  [/STOP\s*WORK\s*ORDER/i, "Stop Work Order"],
-];
+// Violation action types that signal construction opportunity
+const HIGH_SEVERITY_ACTIONS = ["STOP WORK ORDER", "FAILED INSPECTION", "CONDEMNED", "DEMOLITION", "UNSAFE"];
+const MEDIUM_SEVERITY_ACTIONS = ["VIOLATION", "CITATION", "NON-COMPLIANCE", "NOTICE", "WARNING"];
 
 function findCol(record, candidates) {
   for (const c of candidates) {
@@ -107,21 +101,6 @@ function findCol(record, candidates) {
     const lower = c.toLowerCase();
     const match = keys.find((k) => k.toLowerCase() === lower);
     if (match) return match;
-  }
-  return null;
-}
-
-function matchesHotel(text) {
-  if (!text) return false;
-  const upper = String(text).toUpperCase();
-  return HOTEL_KEYWORDS.some((kw) => upper.includes(kw));
-}
-
-function classifyPermit(text) {
-  if (!text) return null;
-  const str = String(text);
-  for (const [pattern, label] of COMMERCIAL_PERMIT_PATTERNS) {
-    if (pattern.test(str)) return label;
   }
   return null;
 }
@@ -140,18 +119,34 @@ function normalizeAddr(raw) {
   return addr.replace(/\s+/g, " ").trim();
 }
 
-function scoreCommercialLead(lead) {
+function classifySeverity(actionText) {
+  if (!actionText) return { level: "general", score: 5 };
+  const upper = String(actionText).toUpperCase();
+  for (const kw of HIGH_SEVERITY_ACTIONS) {
+    if (upper.includes(kw)) return { level: "high", score: 20 };
+  }
+  for (const kw of MEDIUM_SEVERITY_ACTIONS) {
+    if (upper.includes(kw)) return { level: "medium", score: 10 };
+  }
+  return { level: "general", score: 5 };
+}
+
+function scoreViolationLead(lead) {
   let s = 0;
+  s += lead._severity_score || 5;
   if (lead.permit_flag) s += 20;
-  if (lead.out_of_state_owner) s += 20;
-  if (lead.year_built && lead.year_built < 1985) s += 15;
-  if (lead.appraised_value && lead.appraised_value > 2000000) s += 15;
-  if (lead.property_type === "hotel") s += 15;
-  if (lead.permit_status === "Stop Work Order" || lead.permit_status === "Failed Inspection") s += 15;
+  // Multiple violations = more urgent
+  const count = lead._violation_count || 1;
+  if (count >= 5) s += 25;
+  else if (count >= 3) s += 15;
+  else if (count >= 2) s += 10;
+  // Recency bonus — violations in last 90 days are hotter
+  if (lead._most_recent_days != null && lead._most_recent_days <= 90) s += 15;
+  else if (lead._most_recent_days != null && lead._most_recent_days <= 180) s += 10;
   return Math.min(s, 100);
 }
 
-async function fetchCkanPages(resourceId, onProgress, extraParams = {}) {
+async function fetchCkanPages(resourceId, onProgress) {
   const all = [];
   let offset = 0;
   while (true) {
@@ -159,9 +154,8 @@ async function fetchCkanPages(resourceId, onProgress, extraParams = {}) {
       resource_id: resourceId,
       limit: String(CKAN_PAGE_SIZE),
       offset: String(offset),
-      ...extraParams,
     });
-    const resp = await fetch(`${HCAD_CKAN_URL}?${params}`);
+    const resp = await fetch(`${CKAN_URL}?${params}`);
     if (!resp.ok) throw new Error(`CKAN API error: ${resp.status} ${resp.statusText}`);
     const json = await resp.json();
     const records = json?.result?.records || [];
@@ -194,199 +188,234 @@ function DataFetchPanel({ onDone }) {
     setLog([]);
 
     try {
-      // --- Step 1: Fetch HCAD property data ---
-      setStatus("Fetching HCAD property data from Houston Open Data...");
-      addLog("Querying HCAD CKAN API...");
+      // --- Step 1: Fetch code violation data ---
+      setStatus("Fetching Houston code enforcement violations...");
+      addLog("Querying Violations CKAN API...");
 
-      const hcadRaw = await fetchCkanPages(
-        HCAD_RESOURCE_ID,
+      const violationsRaw = await fetchCkanPages(
+        VIOLATIONS_RESOURCE_ID,
         (count) => {
-          setStatus(`Fetching HCAD data: ${count.toLocaleString()} records...`);
+          setStatus(`Fetching violations: ${count.toLocaleString()} records...`);
           setProgress(5 + Math.min(25, Math.round(count / 5000)));
         },
       );
-      addLog(`Fetched ${hcadRaw.length.toLocaleString()} total HCAD records`);
+      addLog(`Fetched ${violationsRaw.length.toLocaleString()} total violation records`);
       setProgress(30);
 
-      if (hcadRaw.length === 0) {
-        setStatus("Error: No data returned from HCAD API.");
+      if (violationsRaw.length === 0) {
+        setStatus("Error: No data returned from Violations API.");
         setRunning(false);
         return;
       }
 
       // Discover columns from first record
-      const sample = hcadRaw[0];
-      const acctCol = findCol(sample, ["ACCT", "acct", "Account", "account", "acct_number"]);
-      const classCol = findCol(sample, ["STATE_CLASS", "state_class", "State_Class", "state_cd", "class_cd"]);
-      const yrCol = findCol(sample, ["YR_IMPR", "yr_impr", "yr_built", "Year_Built", "year_built"]);
-      const valCol = findCol(sample, ["TOT_APPR_VAL", "tot_appr_val", "Appraised_Value", "appraised_value", "Tot_Appr_Val"]);
-      const addrCol = findCol(sample, ["SITE_ADDR_1", "site_addr_1", "Site_Addr_1", "property_address", "address"]);
-      const addr2Col = findCol(sample, ["SITE_ADDR_2", "site_addr_2", "Site_Addr_2"]);
-      const addr3Col = findCol(sample, ["SITE_ADDR_3", "site_addr_3", "Site_Addr_3"]);
-      const nameCol = findCol(sample, ["OWNER", "owner", "Owner", "owner_name", "NAME", "name"]);
-      const mailCol = findCol(sample, ["MAIL_ADDR_1", "mail_addr_1", "Mail_Addr_1", "mail_addr", "owner_mail_address"]);
-      const mailStateCol = findCol(sample, ["MAIL_STATE", "mail_state", "Mail_State", "mail_st"]);
-      const descCol = findCol(sample, ["DESCRIPTION", "description", "Description", "IMPR_DESC", "impr_desc", "BLD_NAME", "bld_name"]);
+      const sample = violationsRaw[0];
+      const allKeys = Object.keys(sample);
+      addLog(`Columns (${allKeys.length}): ${allKeys.join(", ")}`);
+      console.log("Violation sample record:", sample);
 
-      addLog(`Columns found — acct: ${acctCol || "?"}, class: ${classCol || "?"}, year: ${yrCol || "?"}, value: ${valCol || "?"}, addr: ${addrCol || "?"}, owner: ${nameCol || "?"}, desc: ${descCol || "?"}`);
+      // Find key columns — try common code enforcement column names
+      const addrCol = findCol(sample, [
+        "Address", "address", "SITE_ADDRESS", "Site_Address", "site_address",
+        "Property_Address", "property_address", "Location", "location",
+        "LOCATION", "Street_Address", "street_address", "PROJECT_ADDRESS",
+      ]);
+      const dateCol = findCol(sample, [
+        "Action_Date", "action_date", "Date", "date", "Violation_Date",
+        "violation_date", "Created_Date", "created_date", "CREATED_DATE",
+        "Open_Date", "open_date", "Report_Date",
+      ]);
+      const actionCol = findCol(sample, [
+        "Action", "action", "Action_Type", "action_type", "Violation_Type",
+        "violation_type", "Type", "type", "Category", "category",
+      ]);
+      const actionTypeCol = findCol(sample, [
+        "Action_Type", "action_type", "Action_Level", "action_level",
+        "Violation_Type", "violation_type", "ViolationSubId",
+      ]);
+      const commentsCol = findCol(sample, [
+        "Comments", "comments", "Description", "description", "Narrative",
+        "narrative", "Details", "details",
+      ]);
+      const idCol = findCol(sample, [
+        "Sr_Request_Num", "sr_request_num", "Case_Number", "case_number",
+        "NPPRJID", "Record_ID", "record_id", "_id",
+      ]);
 
-      // --- Step 2: Filter for F1 commercial + hotel keywords ---
-      setStatus("Filtering for F1 commercial properties with hotel keywords...");
+      addLog(`Mapped — addr: ${addrCol || "NONE"}, date: ${dateCol || "NONE"}, action: ${actionCol || "NONE"}, type: ${actionTypeCol || "NONE"}, comments: ${commentsCol || "NONE"}, id: ${idCol || "_id"}`);
 
-      const filtered = [];
-      for (const rec of hcadRaw) {
-        // F1 filter
-        if (classCol) {
-          const cls = String(rec[classCol] || "").trim().toUpperCase();
-          if (cls !== "F1") continue;
-        }
-
-        // Hotel keyword filter across description/name columns
-        const descText = [descCol, nameCol].filter(Boolean).map((c) => rec[c]).join(" ");
-        if (!matchesHotel(descText)) continue;
-
-        // Year filter: 1970-2010
-        const yr = parseInt(rec[yrCol]) || 0;
-        if (yrCol && (yr < 1970 || yr > 2010)) continue;
-
-        // Build address
-        const addrParts = [addrCol, addr2Col, addr3Col]
-          .filter(Boolean)
-          .map((c) => String(rec[c] || "").trim())
-          .filter(Boolean);
-        const propertyAddress = addrParts.join(" ").replace(/\s+/g, " ").trim();
-
-        const mailState = mailStateCol ? String(rec[mailStateCol] || "").trim().toUpperCase() : "";
-        const outOfState = mailState !== "" && mailState !== "TX";
-
-        filtered.push({
-          acct_number: String(rec[acctCol] || "").trim(),
-          property_address: propertyAddress,
-          owner_name: nameCol ? String(rec[nameCol] || "").trim() : "",
-          owner_mail_address: mailCol ? String(rec[mailCol] || "").trim() : "",
-          year_built: yr || null,
-          appraised_value: valCol ? parseFloat(rec[valCol]) || null : null,
-          property_type: matchesHotel(descText) ? "hotel" : "commercial",
-          out_of_state_owner: outOfState,
-          permit_flag: false,
-          permit_type: null,
-          permit_status: null,
-          permit_date: null,
-          _addr_norm: normalizeAddr(propertyAddress),
-        });
-      }
-
-      addLog(`F1 + hotel keyword filter: ${filtered.length} properties`);
-      setProgress(40);
-
-      if (filtered.length === 0) {
-        setStatus("No F1 commercial/hotel properties found. This dataset may not be HCAD property data — see the log below and check the browser console for the full sample record.");
-        const allKeys = Object.keys(sample);
-        addLog(`ALL columns (${allKeys.length}): ${allKeys.join(", ")}`);
-        addLog(`First record (JSON): ${JSON.stringify(sample).slice(0, 800)}...`);
-        console.log("Full sample record:", sample);
-        console.log("All columns:", allKeys);
+      if (!addrCol) {
+        // No address column found — log all columns and sample for debugging
+        setStatus("Error: No address column found in violation data. See log for all available columns.");
+        addLog(`First record: ${JSON.stringify(sample).slice(0, 1000)}`);
         setRunning(false);
         return;
       }
 
-      // --- Step 3: Fetch permits ---
-      setStatus("Fetching permit data from Houston Open Data...");
+      // --- Step 2: Filter recent violations and group by address ---
+      setStatus("Filtering recent violations and grouping by address...");
+      const cutoff = new Date();
+      cutoff.setTime(cutoff.getTime() - RECENT_DAYS * 24 * 60 * 60 * 1000);
+
+      const addressMap = new Map();
+      let recentCount = 0;
+      let skippedOld = 0;
+
+      for (const rec of violationsRaw) {
+        // Recency filter
+        if (dateCol) {
+          const d = new Date(rec[dateCol]);
+          if (!isNaN(d.getTime()) && d < cutoff) {
+            skippedOld++;
+            continue;
+          }
+        }
+
+        const rawAddr = String(rec[addrCol] || "").trim();
+        if (!rawAddr) continue;
+        recentCount++;
+
+        const normAddr = normalizeAddr(rawAddr);
+        const actionText = [actionCol, actionTypeCol, commentsCol]
+          .filter(Boolean)
+          .map((c) => String(rec[c] || ""))
+          .join(" ");
+        const { level, score } = classifySeverity(actionText);
+        const violationDate = dateCol && rec[dateCol] ? new Date(rec[dateCol]) : null;
+        const caseId = idCol ? String(rec[idCol] || "") : "";
+
+        const existing = addressMap.get(normAddr);
+        if (existing) {
+          existing.count++;
+          if (score > existing.severity_score) {
+            existing.severity_score = score;
+            existing.severity_level = level;
+            existing.worst_action = actionText.slice(0, 200);
+          }
+          if (violationDate && (!existing.most_recent || violationDate > existing.most_recent)) {
+            existing.most_recent = violationDate;
+          }
+          if (caseId && !existing.case_ids.includes(caseId)) {
+            existing.case_ids.push(caseId);
+          }
+        } else {
+          addressMap.set(normAddr, {
+            raw_address: rawAddr,
+            count: 1,
+            severity_score: score,
+            severity_level: level,
+            worst_action: actionText.slice(0, 200),
+            most_recent: violationDate,
+            case_ids: caseId ? [caseId] : [],
+          });
+        }
+      }
+
+      addLog(`Recent violations (last ${RECENT_DAYS} days): ${recentCount.toLocaleString()} (skipped ${skippedOld.toLocaleString()} older)`);
+      addLog(`Unique addresses with violations: ${addressMap.size.toLocaleString()}`);
+      setProgress(45);
+
+      if (addressMap.size === 0) {
+        setStatus("No recent violations found with valid addresses.");
+        setRunning(false);
+        return;
+      }
+
+      // --- Step 3: Fetch permits to enrich ---
+      setStatus("Fetching permit data to cross-reference...");
       addLog("Querying Houston Permits CKAN API...");
 
       const permitRaw = await fetchCkanPages(
         PERMIT_RESOURCE_ID,
         (count) => {
           setStatus(`Fetching permits: ${count.toLocaleString()} records...`);
-          setProgress(40 + Math.min(20, Math.round(count / 5000)));
+          setProgress(45 + Math.min(15, Math.round(count / 5000)));
         },
       );
-      addLog(`Fetched ${permitRaw.length.toLocaleString()} total permit records`);
+      addLog(`Fetched ${permitRaw.length.toLocaleString()} permit records`);
       setProgress(60);
 
-      // --- Step 4: Filter permits for commercial types ---
-      setStatus("Filtering for commercial permit types...");
-      const cutoff = new Date();
-      cutoff.setFullYear(cutoff.getFullYear() - 1);
-
-      const permitMap = new Map();
+      // Build permit address set for cross-reference
+      const permitAddrs = new Set();
       if (permitRaw.length > 0) {
         const pSample = permitRaw[0];
         const pAddrCol = findCol(pSample, ["Address", "address", "project_address", "street_address"]);
-        const pTypeCol = findCol(pSample, ["Permit Type", "permit_type", "Type", "type"]);
-        const pDescCol = findCol(pSample, ["Description", "description", "Project Description", "permit_description"]);
-        const pDateCol = findCol(pSample, ["Issue Date", "issue_date", "Issued Date", "permit_date", "Date Issued"]);
-
-        for (const rec of permitRaw) {
-          const typeText = [pTypeCol, pDescCol].filter(Boolean).map((c) => rec[c]).join(" ");
-          const category = classifyPermit(typeText);
-          if (!category) continue;
-
-          // Recency filter
-          if (pDateCol) {
-            const d = new Date(rec[pDateCol]);
-            if (!isNaN(d) && d < cutoff) continue;
-          }
-
-          const addr = pAddrCol ? normalizeAddr(rec[pAddrCol]) : "";
-          if (!addr) continue;
-
-          const existing = permitMap.get(addr);
-          const severity = ["Stop Work Order", "Failed Inspection", "Code Violation", "Change of Occupancy", "Change of Use", "Tenant Improvement", "Certificate of Occupancy"].indexOf(category);
-          if (!existing || severity < existing.severity) {
-            permitMap.set(addr, {
-              category,
-              severity,
-              date: pDateCol ? rec[pDateCol] : null,
-            });
+        if (pAddrCol) {
+          for (const rec of permitRaw) {
+            const addr = normalizeAddr(rec[pAddrCol]);
+            if (addr) permitAddrs.add(addr);
           }
         }
       }
-      addLog(`Commercial permits (last 12 months): ${permitMap.size} unique addresses`);
+      addLog(`Permit addresses loaded: ${permitAddrs.size.toLocaleString()}`);
       setProgress(70);
 
-      // --- Step 5: Join permits to properties and score ---
+      // --- Step 4: Build scored leads ---
       setStatus("Scoring leads...");
-      let matchCount = 0;
-      for (const lead of filtered) {
-        const permit = permitMap.get(lead._addr_norm);
-        if (permit) {
-          lead.permit_flag = true;
-          lead.permit_type = permit.category;
-          lead.permit_status = permit.category;
-          lead.permit_date = permit.date ? new Date(permit.date).toISOString().slice(0, 10) : null;
-          matchCount++;
-        }
-        lead.lead_score = scoreCommercialLead(lead);
-        delete lead._addr_norm;
+      const leads = [];
+      const now = new Date();
+
+      for (const [normAddr, data] of addressMap) {
+        const hasPermit = permitAddrs.has(normAddr);
+        const daysSince = data.most_recent
+          ? Math.round((now - data.most_recent) / (1000 * 60 * 60 * 24))
+          : null;
+
+        const lead = {
+          acct_number: data.case_ids[0] || normAddr.replace(/\s+/g, "-").slice(0, 50),
+          property_address: data.raw_address,
+          owner_name: "",
+          owner_mail_address: "",
+          year_built: null,
+          appraised_value: null,
+          property_type: data.severity_level === "high" ? "high-priority" : "violation",
+          out_of_state_owner: false,
+          permit_flag: hasPermit,
+          permit_type: hasPermit ? "Active Permit" : data.worst_action.slice(0, 100),
+          permit_status: data.worst_action.slice(0, 100),
+          permit_date: data.most_recent ? data.most_recent.toISOString().slice(0, 10) : null,
+          _severity_score: data.severity_score,
+          _violation_count: data.count,
+          _most_recent_days: daysSince,
+        };
+        lead.lead_score = scoreViolationLead(lead);
+        leads.push(lead);
       }
 
-      addLog(`Permit matches: ${matchCount} leads with active permits`);
-      filtered.sort((a, b) => b.lead_score - a.lead_score);
+      // Clean internal fields before upsert
+      for (const lead of leads) {
+        delete lead._severity_score;
+        delete lead._violation_count;
+        delete lead._most_recent_days;
+      }
+
+      leads.sort((a, b) => b.lead_score - a.lead_score);
+      addLog(`Scored ${leads.length} leads. Top score: ${leads[0]?.lead_score}`);
       setProgress(75);
 
-      // --- Step 6: Upsert to Supabase ---
-      setStatus(`Uploading ${filtered.length} scored leads to Supabase...`);
+      // --- Step 5: Upsert to Supabase ---
+      setStatus(`Uploading ${leads.length} leads to Supabase...`);
       const batchSize = 500;
       let uploaded = 0;
-      for (let i = 0; i < filtered.length; i += batchSize) {
-        const batch = filtered.slice(i, i + batchSize);
+      for (let i = 0; i < leads.length; i += batchSize) {
+        const batch = leads.slice(i, i + batchSize);
         const { error } = await supabase
           .from("commercial_leads")
           .upsert(batch, { onConflict: "acct_number" });
         if (error) {
           setStatus(`Error at row ${i}: ${error.message}`);
+          addLog(`Supabase error: ${error.message}`);
           setRunning(false);
           return;
         }
         uploaded += batch.length;
-        setProgress(75 + Math.round((uploaded / filtered.length) * 25));
-        setStatus(`Uploaded ${uploaded}/${filtered.length}...`);
+        setProgress(75 + Math.round((uploaded / leads.length) * 25));
+        setStatus(`Uploaded ${uploaded}/${leads.length}...`);
       }
 
-      const topLead = filtered[0];
-      addLog(`Top lead: ${topLead?.property_address} (score ${topLead?.lead_score})`);
-      setStatus(`Done! ${uploaded} commercial leads scored and uploaded.`);
+      const top3 = leads.slice(0, 3).map((l) => `${l.property_address} (score ${l.lead_score})`).join("; ");
+      addLog(`Top leads: ${top3}`);
+      setStatus(`Done! ${uploaded} violation-based leads scored and uploaded.`);
       setProgress(100);
       setRunning(false);
       if (onDone) onDone();
@@ -406,7 +435,7 @@ function DataFetchPanel({ onDone }) {
       >
         <div>
           <span className="font-medium text-gray-900">Fetch &amp; Score Commercial Leads</span>
-          <span className="text-xs text-gray-500 ml-2">Pull live data from Houston Open Data APIs</span>
+          <span className="text-xs text-gray-500 ml-2">Pull live violation data from Houston Open Data</span>
         </div>
         <span className="text-gray-400">{open ? "\u25B2" : "\u25BC"}</span>
       </button>
@@ -414,10 +443,9 @@ function DataFetchPanel({ onDone }) {
       {open && (
         <div className="px-4 pb-4 border-t border-gray-100 pt-3 space-y-3">
           <p className="text-xs text-gray-500">
-            Pulls HCAD property data + Houston permit data directly from the city's CKAN API.
-            Filters for F1 commercial properties with hotel/hospitality keywords (built 1970-2010),
-            matches permits (TI, code violations, stop work orders from the last 12 months),
-            scores 0-100, and uploads to Supabase.
+            Pulls Houston code enforcement violations (last 12 months) + permit data from the city's CKAN API.
+            Groups violations by address, scores by severity and frequency,
+            cross-references with active permits, and uploads to Supabase.
           </p>
 
           <button
@@ -425,7 +453,7 @@ function DataFetchPanel({ onDone }) {
             disabled={running}
             className="bg-blue-600 text-white py-2 px-5 rounded-md hover:bg-blue-700 transition-colors font-medium text-sm disabled:opacity-50"
           >
-            {running ? "Processing..." : "Fetch from HCAD & Score"}
+            {running ? "Processing..." : "Fetch Violations & Score"}
           </button>
 
           {(running || progress > 0) && (
@@ -442,7 +470,7 @@ function DataFetchPanel({ onDone }) {
             </p>
           )}
           {log.length > 0 && (
-            <div className="bg-gray-50 rounded-md p-2 max-h-40 overflow-y-auto">
+            <div className="bg-gray-50 rounded-md p-2 max-h-48 overflow-y-auto">
               {log.map((msg, i) => (
                 <p key={i} className="text-xs text-gray-600 font-mono">{msg}</p>
               ))}
