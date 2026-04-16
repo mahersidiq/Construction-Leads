@@ -76,132 +76,322 @@ function StatCard({ label, value, color }) {
   );
 }
 
-function parseCsvLine(line) {
-  const values = [];
-  let current = "";
-  let inQuotes = false;
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i];
-    if (inQuotes) {
-      if (ch === '"' && line[i + 1] === '"') {
-        current += '"';
-        i++;
-      } else if (ch === '"') {
-        inQuotes = false;
-      } else {
-        current += ch;
-      }
-    } else if (ch === '"') {
-      inQuotes = true;
-    } else if (ch === ",") {
-      values.push(current);
-      current = "";
-    } else {
-      current += ch;
-    }
-  }
-  values.push(current);
-  return values;
-}
+// ---------------------------------------------------------------------------
+// HCAD + Permit API Data Fetch Pipeline (runs entirely in the browser)
+// ---------------------------------------------------------------------------
 
-const COMMERCIAL_FIELDS = [
-  "acct_number", "property_address", "owner_name", "owner_mail_address",
-  "year_built", "appraised_value", "property_type", "out_of_state_owner",
-  "permit_flag", "permit_type", "permit_status", "permit_date", "lead_score",
+const HCAD_CKAN_URL = "https://data.houstontx.gov/api/3/action/datastore_search";
+const HCAD_RESOURCE_ID = "84a171f2-d601-4c79-bc4d-9733b378c663";
+const PERMIT_RESOURCE_ID = "80b03984-0e31-41ff-937b-35b686755bf9";
+const CKAN_PAGE_SIZE = 32000;
+
+const HOTEL_KEYWORDS = ["HOTEL", "MOTEL", "INN", "LODGE", "SUITES", "EXTENDED STAY", "HOSPITALITY"];
+
+const COMMERCIAL_PERMIT_PATTERNS = [
+  [/TENANT\s*IMPROVEMENT/i, "Tenant Improvement"],
+  [/\bTI\b/i, "Tenant Improvement"],
+  [/CHANGE\s*OF\s*OCCUPANCY/i, "Change of Occupancy"],
+  [/CHANGE\s*OF\s*USE/i, "Change of Use"],
+  [/CERTIFICATE\s*OF\s*OCCUPANCY/i, "Certificate of Occupancy"],
+  [/CODE\s*VIOLATION/i, "Code Violation"],
+  [/FAILED\s*INSPECTION/i, "Failed Inspection"],
+  [/STOP\s*WORK\s*ORDER/i, "Stop Work Order"],
 ];
 
-function CsvUploadPanel({ onDone }) {
+function findCol(record, candidates) {
+  for (const c of candidates) {
+    if (c in record) return c;
+  }
+  const keys = Object.keys(record);
+  for (const c of candidates) {
+    const lower = c.toLowerCase();
+    const match = keys.find((k) => k.toLowerCase() === lower);
+    if (match) return match;
+  }
+  return null;
+}
+
+function matchesHotel(text) {
+  if (!text) return false;
+  const upper = String(text).toUpperCase();
+  return HOTEL_KEYWORDS.some((kw) => upper.includes(kw));
+}
+
+function classifyPermit(text) {
+  if (!text) return null;
+  const str = String(text);
+  for (const [pattern, label] of COMMERCIAL_PERMIT_PATTERNS) {
+    if (pattern.test(str)) return label;
+  }
+  return null;
+}
+
+function normalizeAddr(raw) {
+  if (!raw) return "";
+  let addr = String(raw).toUpperCase().trim().split(",")[0].trim();
+  addr = addr.replace(/\b(UNIT|STE|SUITE|APT|#)\s*\S*/g, "");
+  addr = addr.replace(/\b\d{5}(-\d{4})?\s*$/, "");
+  for (const [long, short] of [["STREET","ST"],["AVENUE","AVE"],["BOULEVARD","BLVD"],["DRIVE","DR"],["LANE","LN"],["ROAD","RD"],["COURT","CT"],["CIRCLE","CIR"],["PLACE","PL"],["PARKWAY","PKWY"],["HIGHWAY","HWY"]]) {
+    addr = addr.replace(new RegExp("\\b" + long + "\\b", "g"), short);
+  }
+  for (const city of ["HOUSTON","BELLAIRE","PASADENA","DEER PARK","BAYTOWN","HUMBLE","KATY","TOMBALL","SPRING","CYPRESS"]) {
+    addr = addr.replace(new RegExp("\\b" + city + "\\s*$"), "");
+  }
+  return addr.replace(/\s+/g, " ").trim();
+}
+
+function scoreCommercialLead(lead) {
+  let s = 0;
+  if (lead.permit_flag) s += 20;
+  if (lead.out_of_state_owner) s += 20;
+  if (lead.year_built && lead.year_built < 1985) s += 15;
+  if (lead.appraised_value && lead.appraised_value > 2000000) s += 15;
+  if (lead.property_type === "hotel") s += 15;
+  if (lead.permit_status === "Stop Work Order" || lead.permit_status === "Failed Inspection") s += 15;
+  return Math.min(s, 100);
+}
+
+async function fetchCkanPages(resourceId, onProgress, extraParams = {}) {
+  const all = [];
+  let offset = 0;
+  while (true) {
+    const params = new URLSearchParams({
+      resource_id: resourceId,
+      limit: String(CKAN_PAGE_SIZE),
+      offset: String(offset),
+      ...extraParams,
+    });
+    const resp = await fetch(`${HCAD_CKAN_URL}?${params}`);
+    if (!resp.ok) throw new Error(`CKAN API error: ${resp.status} ${resp.statusText}`);
+    const json = await resp.json();
+    const records = json?.result?.records || [];
+    if (records.length === 0) break;
+    all.push(...records);
+    if (onProgress) onProgress(all.length);
+    if (records.length < CKAN_PAGE_SIZE) break;
+    offset += CKAN_PAGE_SIZE;
+  }
+  return all;
+}
+
+function DataFetchPanel({ onDone }) {
   const [open, setOpen] = useState(false);
-  const [uploading, setUploading] = useState(false);
+  const [running, setRunning] = useState(false);
   const [status, setStatus] = useState("");
   const [progress, setProgress] = useState(0);
+  const [log, setLog] = useState([]);
 
-  const handleFile = async (e) => {
-    const file = e.target.files?.[0];
-    if (!file || !supabaseConfigured) return;
+  const addLog = (msg) => setLog((prev) => [...prev, msg]);
 
-    setUploading(true);
-    setStatus("Reading CSV...");
-    setProgress(10);
+  const runPipeline = async () => {
+    if (!supabaseConfigured) {
+      setStatus("Error: Supabase is not configured.");
+      return;
+    }
+    setRunning(true);
+    setStatus("Starting...");
+    setProgress(5);
+    setLog([]);
 
     try {
-      const text = await file.text();
-      const lines = text.split("\n").filter((l) => l.trim());
-      if (lines.length < 2) {
-        setStatus("Error: CSV has no data rows.");
-        setUploading(false);
+      // --- Step 1: Fetch HCAD property data ---
+      setStatus("Fetching HCAD property data from Houston Open Data...");
+      addLog("Querying HCAD CKAN API...");
+
+      const hcadRaw = await fetchCkanPages(
+        HCAD_RESOURCE_ID,
+        (count) => {
+          setStatus(`Fetching HCAD data: ${count.toLocaleString()} records...`);
+          setProgress(5 + Math.min(25, Math.round(count / 5000)));
+        },
+      );
+      addLog(`Fetched ${hcadRaw.length.toLocaleString()} total HCAD records`);
+      setProgress(30);
+
+      if (hcadRaw.length === 0) {
+        setStatus("Error: No data returned from HCAD API.");
+        setRunning(false);
         return;
       }
 
-      const headers = parseCsvLine(lines[0]).map((h) => h.trim().toLowerCase());
-      const acctIdx = headers.indexOf("acct_number");
-      if (acctIdx === -1) {
-        setStatus("Error: CSV must have an 'acct_number' column.");
-        setUploading(false);
+      // Discover columns from first record
+      const sample = hcadRaw[0];
+      const acctCol = findCol(sample, ["ACCT", "acct", "Account", "account", "acct_number"]);
+      const classCol = findCol(sample, ["STATE_CLASS", "state_class", "State_Class", "state_cd", "class_cd"]);
+      const yrCol = findCol(sample, ["YR_IMPR", "yr_impr", "yr_built", "Year_Built", "year_built"]);
+      const valCol = findCol(sample, ["TOT_APPR_VAL", "tot_appr_val", "Appraised_Value", "appraised_value", "Tot_Appr_Val"]);
+      const addrCol = findCol(sample, ["SITE_ADDR_1", "site_addr_1", "Site_Addr_1", "property_address", "address"]);
+      const addr2Col = findCol(sample, ["SITE_ADDR_2", "site_addr_2", "Site_Addr_2"]);
+      const addr3Col = findCol(sample, ["SITE_ADDR_3", "site_addr_3", "Site_Addr_3"]);
+      const nameCol = findCol(sample, ["OWNER", "owner", "Owner", "owner_name", "NAME", "name"]);
+      const mailCol = findCol(sample, ["MAIL_ADDR_1", "mail_addr_1", "Mail_Addr_1", "mail_addr", "owner_mail_address"]);
+      const mailStateCol = findCol(sample, ["MAIL_STATE", "mail_state", "Mail_State", "mail_st"]);
+      const descCol = findCol(sample, ["DESCRIPTION", "description", "Description", "IMPR_DESC", "impr_desc", "BLD_NAME", "bld_name"]);
+
+      addLog(`Columns found — acct: ${acctCol || "?"}, class: ${classCol || "?"}, year: ${yrCol || "?"}, value: ${valCol || "?"}, addr: ${addrCol || "?"}, owner: ${nameCol || "?"}, desc: ${descCol || "?"}`);
+
+      // --- Step 2: Filter for F1 commercial + hotel keywords ---
+      setStatus("Filtering for F1 commercial properties with hotel keywords...");
+
+      const filtered = [];
+      for (const rec of hcadRaw) {
+        // F1 filter
+        if (classCol) {
+          const cls = String(rec[classCol] || "").trim().toUpperCase();
+          if (cls !== "F1") continue;
+        }
+
+        // Hotel keyword filter across description/name columns
+        const descText = [descCol, nameCol].filter(Boolean).map((c) => rec[c]).join(" ");
+        if (!matchesHotel(descText)) continue;
+
+        // Year filter: 1970-2010
+        const yr = parseInt(rec[yrCol]) || 0;
+        if (yrCol && (yr < 1970 || yr > 2010)) continue;
+
+        // Build address
+        const addrParts = [addrCol, addr2Col, addr3Col]
+          .filter(Boolean)
+          .map((c) => String(rec[c] || "").trim())
+          .filter(Boolean);
+        const propertyAddress = addrParts.join(" ").replace(/\s+/g, " ").trim();
+
+        const mailState = mailStateCol ? String(rec[mailStateCol] || "").trim().toUpperCase() : "";
+        const outOfState = mailState !== "" && mailState !== "TX";
+
+        filtered.push({
+          acct_number: String(rec[acctCol] || "").trim(),
+          property_address: propertyAddress,
+          owner_name: nameCol ? String(rec[nameCol] || "").trim() : "",
+          owner_mail_address: mailCol ? String(rec[mailCol] || "").trim() : "",
+          year_built: yr || null,
+          appraised_value: valCol ? parseFloat(rec[valCol]) || null : null,
+          property_type: matchesHotel(descText) ? "hotel" : "commercial",
+          out_of_state_owner: outOfState,
+          permit_flag: false,
+          permit_type: null,
+          permit_status: null,
+          permit_date: null,
+          _addr_norm: normalizeAddr(propertyAddress),
+        });
+      }
+
+      addLog(`F1 + hotel keyword filter: ${filtered.length} properties`);
+      setProgress(40);
+
+      if (filtered.length === 0) {
+        setStatus("No F1 commercial/hotel properties found. The HCAD dataset columns may have changed — check the browser console.");
+        addLog(`Available columns in first record: ${Object.keys(sample).join(", ")}`);
+        console.log("HCAD sample record:", sample);
+        setRunning(false);
         return;
       }
 
-      setStatus(`Parsing ${lines.length - 1} rows...`);
-      setProgress(25);
+      // --- Step 3: Fetch permits ---
+      setStatus("Fetching permit data from Houston Open Data...");
+      addLog("Querying Houston Permits CKAN API...");
 
-      const rows = [];
-      for (let i = 1; i < lines.length; i++) {
-        const vals = parseCsvLine(lines[i]);
-        const row = {};
-        for (const field of COMMERCIAL_FIELDS) {
-          const idx = headers.indexOf(field);
-          if (idx === -1 || idx >= vals.length) continue;
-          const raw = vals[idx].trim();
-          if (!raw) continue;
+      const permitRaw = await fetchCkanPages(
+        PERMIT_RESOURCE_ID,
+        (count) => {
+          setStatus(`Fetching permits: ${count.toLocaleString()} records...`);
+          setProgress(40 + Math.min(20, Math.round(count / 5000)));
+        },
+      );
+      addLog(`Fetched ${permitRaw.length.toLocaleString()} total permit records`);
+      setProgress(60);
 
-          if (field === "year_built" || field === "lead_score") {
-            const n = parseInt(raw);
-            if (!isNaN(n)) row[field] = n;
-          } else if (field === "appraised_value") {
-            const n = parseFloat(raw);
-            if (!isNaN(n)) row[field] = n;
-          } else if (field === "out_of_state_owner" || field === "permit_flag") {
-            row[field] = raw.toLowerCase() === "true" || raw === "1";
-          } else {
-            row[field] = raw;
+      // --- Step 4: Filter permits for commercial types ---
+      setStatus("Filtering for commercial permit types...");
+      const cutoff = new Date();
+      cutoff.setFullYear(cutoff.getFullYear() - 1);
+
+      const permitMap = new Map();
+      if (permitRaw.length > 0) {
+        const pSample = permitRaw[0];
+        const pAddrCol = findCol(pSample, ["Address", "address", "project_address", "street_address"]);
+        const pTypeCol = findCol(pSample, ["Permit Type", "permit_type", "Type", "type"]);
+        const pDescCol = findCol(pSample, ["Description", "description", "Project Description", "permit_description"]);
+        const pDateCol = findCol(pSample, ["Issue Date", "issue_date", "Issued Date", "permit_date", "Date Issued"]);
+
+        for (const rec of permitRaw) {
+          const typeText = [pTypeCol, pDescCol].filter(Boolean).map((c) => rec[c]).join(" ");
+          const category = classifyPermit(typeText);
+          if (!category) continue;
+
+          // Recency filter
+          if (pDateCol) {
+            const d = new Date(rec[pDateCol]);
+            if (!isNaN(d) && d < cutoff) continue;
+          }
+
+          const addr = pAddrCol ? normalizeAddr(rec[pAddrCol]) : "";
+          if (!addr) continue;
+
+          const existing = permitMap.get(addr);
+          const severity = ["Stop Work Order", "Failed Inspection", "Code Violation", "Change of Occupancy", "Change of Use", "Tenant Improvement", "Certificate of Occupancy"].indexOf(category);
+          if (!existing || severity < existing.severity) {
+            permitMap.set(addr, {
+              category,
+              severity,
+              date: pDateCol ? rec[pDateCol] : null,
+            });
           }
         }
-        if (row.acct_number) rows.push(row);
+      }
+      addLog(`Commercial permits (last 12 months): ${permitMap.size} unique addresses`);
+      setProgress(70);
+
+      // --- Step 5: Join permits to properties and score ---
+      setStatus("Scoring leads...");
+      let matchCount = 0;
+      for (const lead of filtered) {
+        const permit = permitMap.get(lead._addr_norm);
+        if (permit) {
+          lead.permit_flag = true;
+          lead.permit_type = permit.category;
+          lead.permit_status = permit.category;
+          lead.permit_date = permit.date ? new Date(permit.date).toISOString().slice(0, 10) : null;
+          matchCount++;
+        }
+        lead.lead_score = scoreCommercialLead(lead);
+        delete lead._addr_norm;
       }
 
-      if (rows.length === 0) {
-        setStatus("Error: No valid rows found.");
-        setUploading(false);
-        return;
-      }
+      addLog(`Permit matches: ${matchCount} leads with active permits`);
+      filtered.sort((a, b) => b.lead_score - a.lead_score);
+      setProgress(75);
 
-      setStatus(`Uploading ${rows.length} commercial leads...`);
-      setProgress(50);
-
+      // --- Step 6: Upsert to Supabase ---
+      setStatus(`Uploading ${filtered.length} scored leads to Supabase...`);
       const batchSize = 500;
       let uploaded = 0;
-      for (let i = 0; i < rows.length; i += batchSize) {
-        const batch = rows.slice(i, i + batchSize);
+      for (let i = 0; i < filtered.length; i += batchSize) {
+        const batch = filtered.slice(i, i + batchSize);
         const { error } = await supabase
           .from("commercial_leads")
           .upsert(batch, { onConflict: "acct_number" });
         if (error) {
           setStatus(`Error at row ${i}: ${error.message}`);
-          setUploading(false);
+          setRunning(false);
           return;
         }
         uploaded += batch.length;
-        setProgress(50 + Math.round((uploaded / rows.length) * 50));
-        setStatus(`Uploaded ${uploaded}/${rows.length}...`);
+        setProgress(75 + Math.round((uploaded / filtered.length) * 25));
+        setStatus(`Uploaded ${uploaded}/${filtered.length}...`);
       }
 
-      setStatus(`Done! ${uploaded} commercial leads uploaded.`);
+      const topLead = filtered[0];
+      addLog(`Top lead: ${topLead?.property_address} (score ${topLead?.lead_score})`);
+      setStatus(`Done! ${uploaded} commercial leads scored and uploaded.`);
       setProgress(100);
-      setUploading(false);
+      setRunning(false);
       if (onDone) onDone();
     } catch (err) {
       setStatus(`Error: ${err.message}`);
-      setUploading(false);
+      addLog(`Error: ${err.stack || err.message}`);
+      console.error(err);
+      setRunning(false);
     }
   };
 
@@ -212,8 +402,8 @@ function CsvUploadPanel({ onDone }) {
         className="w-full px-4 py-3 flex justify-between items-center text-left hover:bg-gray-50"
       >
         <div>
-          <span className="font-medium text-gray-900">Upload Commercial Leads</span>
-          <span className="text-xs text-gray-500 ml-2">Import a CSV with scored commercial lead data</span>
+          <span className="font-medium text-gray-900">Fetch &amp; Score Commercial Leads</span>
+          <span className="text-xs text-gray-500 ml-2">Pull live data from Houston Open Data APIs</span>
         </div>
         <span className="text-gray-400">{open ? "\u25B2" : "\u25BC"}</span>
       </button>
@@ -221,20 +411,21 @@ function CsvUploadPanel({ onDone }) {
       {open && (
         <div className="px-4 pb-4 border-t border-gray-100 pt-3 space-y-3">
           <p className="text-xs text-gray-500">
-            Upload <code className="bg-gray-100 px-1 rounded">scored_commercial_leads.csv</code> from the Python pipeline,
-            or any CSV with an <code className="bg-gray-100 px-1 rounded">acct_number</code> column.
-            Recognized columns: acct_number, property_address, owner_name, owner_mail_address,
-            year_built, appraised_value, property_type, out_of_state_owner, permit_flag,
-            permit_type, permit_status, permit_date, lead_score.
+            Pulls HCAD property data + Houston permit data directly from the city's CKAN API.
+            Filters for F1 commercial properties with hotel/hospitality keywords (built 1970-2010),
+            matches permits (TI, code violations, stop work orders from the last 12 months),
+            scores 0-100, and uploads to Supabase.
           </p>
-          <input
-            type="file"
-            accept=".csv"
-            onChange={handleFile}
-            disabled={uploading}
-            className="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
-          />
-          {(uploading || progress > 0) && (
+
+          <button
+            onClick={runPipeline}
+            disabled={running}
+            className="bg-blue-600 text-white py-2 px-5 rounded-md hover:bg-blue-700 transition-colors font-medium text-sm disabled:opacity-50"
+          >
+            {running ? "Processing..." : "Fetch from HCAD & Score"}
+          </button>
+
+          {(running || progress > 0) && (
             <div className="w-full bg-gray-200 rounded-full h-2">
               <div
                 className="bg-blue-600 h-2 rounded-full transition-all"
@@ -246,6 +437,13 @@ function CsvUploadPanel({ onDone }) {
             <p className={`text-sm ${status.startsWith("Error") ? "text-red-600" : status.startsWith("Done") ? "text-green-600" : "text-gray-600"}`}>
               {status}
             </p>
+          )}
+          {log.length > 0 && (
+            <div className="bg-gray-50 rounded-md p-2 max-h-40 overflow-y-auto">
+              {log.map((msg, i) => (
+                <p key={i} className="text-xs text-gray-600 font-mono">{msg}</p>
+              ))}
+            </div>
           )}
         </div>
       )}
@@ -447,7 +645,7 @@ export default function CommercialLeads({ onBack, onLogout }) {
           <StatCard label="Won" value={won} color="text-green-600" />
         </div>
 
-        <CsvUploadPanel onDone={fetchLeads} />
+        <DataFetchPanel onDone={fetchLeads} />
 
         {/* Filter Bar */}
         <div className="bg-white rounded-lg shadow border border-gray-200 p-4">
