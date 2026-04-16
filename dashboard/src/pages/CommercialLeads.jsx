@@ -15,8 +15,8 @@ const STATUS_OPTIONS = [
 
 const PROPERTY_TYPE_OPTIONS = [
   { value: "", label: "All Types" },
-  { value: "high-priority", label: "High Priority" },
-  { value: "violation", label: "Violation" },
+  { value: "high-priority", label: "High Priority ($10K+ or 5+ permits)" },
+  { value: "active-permit", label: "Active Permit" },
 ];
 
 const DEFAULT_FILTERS = {
@@ -36,13 +36,12 @@ const DEFAULT_FILTERS = {
 
 const COLUMNS = [
   { key: "property_address", label: "Address" },
-  { key: "owner_name", label: "Owner" },
-  { key: "owner_mail_address", label: "Mail Address" },
-  { key: "year_built", label: "Year" },
-  { key: "appraised_value", label: "Value" },
-  { key: "property_type", label: "Type" },
+  { key: "owner_name", label: "Applicant" },
+  { key: "permit_date", label: "Permit Date" },
+  { key: "appraised_value", label: "Fees" },
+  { key: "property_type", label: "Priority" },
   { key: "lead_score", label: "Score" },
-  { key: "permit_flag", label: "Permit" },
+  { key: "permit_type", label: "Permits" },
 ];
 
 function SortArrow({ col, sortCol, sortAsc }) {
@@ -59,10 +58,11 @@ function PropertyTypeBadge({ type }) {
   if (!type) return <span className="text-gray-300">--</span>;
   const colors = type === "high-priority"
     ? "bg-red-100 text-red-800"
-    : "bg-amber-100 text-amber-800";
+    : "bg-blue-100 text-blue-800";
+  const label = type === "high-priority" ? "High Priority" : "Active";
   return (
-    <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold capitalize ${colors}`}>
-      {type}
+    <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold ${colors}`}>
+      {label}
     </span>
   );
 }
@@ -85,6 +85,10 @@ const PERMIT_RESOURCE_ID = "80b03984-0e31-41ff-937b-35b686755bf9";
 const CKAN_PAGE_SIZE = 32000;
 
 const RECENT_DAYS = 365;
+
+// Minimum thresholds to qualify as a lead — filters out routine single-permit businesses
+const MIN_TOTAL_FEES = 5000;
+const MIN_PERMIT_COUNT = 3;
 
 function findCol(record, candidates) {
   for (const c of candidates) {
@@ -320,16 +324,24 @@ function DataFetchPanel({ onDone }) {
         return;
       }
 
-      // --- Step 3: Build scored leads ---
-      setStatus("Scoring leads...");
+      // --- Step 3: Filter for significant activity and build scored leads ---
+      setStatus("Filtering for significant construction activity...");
       const leads = [];
       const now = new Date();
+      let skippedSmall = 0;
 
       for (const [normAddr, data] of addressMap) {
+        // Skip routine single-permit businesses — only keep addresses with
+        // real construction activity (high fees OR multiple permits)
+        if (data.total_fees < MIN_TOTAL_FEES && data.count < MIN_PERMIT_COUNT) {
+          skippedSmall++;
+          continue;
+        }
+
         const daysSince = data.most_recent
           ? Math.round((now - data.most_recent) / (1000 * 60 * 60 * 24))
           : null;
-        const isHighValue = data.total_fees >= 10000 || data.count >= 3;
+        const isHighValue = data.total_fees >= 10000 || data.count >= 5;
 
         const lead = {
           acct_number: data.ids[0] || normAddr.replace(/\s+/g, "-").slice(0, 50),
@@ -338,10 +350,10 @@ function DataFetchPanel({ onDone }) {
           owner_mail_address: data.zip ? `Houston, TX ${data.zip}` : "",
           year_built: null,
           appraised_value: data.total_fees > 0 ? data.total_fees : null,
-          property_type: isHighValue ? "high-priority" : "violation",
+          property_type: isHighValue ? "high-priority" : "active-permit",
           out_of_state_owner: false,
           permit_flag: true,
-          permit_type: `${data.count} permit(s), $${data.total_fees.toLocaleString()} fees`,
+          permit_type: `${data.count} permit(s), $${Math.round(data.total_fees).toLocaleString()} in fees`,
           permit_status: data.project || `${data.count} permits`,
           permit_date: data.most_recent ? data.most_recent.toISOString().slice(0, 10) : null,
           _total_fees: data.total_fees,
@@ -353,6 +365,8 @@ function DataFetchPanel({ onDone }) {
         leads.push(lead);
       }
 
+      addLog(`Filtered: ${skippedSmall.toLocaleString()} addresses below threshold ($${MIN_TOTAL_FEES.toLocaleString()} fees or ${MIN_PERMIT_COUNT}+ permits)`);
+
       // Clean internal fields
       for (const lead of leads) {
         delete lead._total_fees;
@@ -362,7 +376,7 @@ function DataFetchPanel({ onDone }) {
       }
 
       leads.sort((a, b) => b.lead_score - a.lead_score);
-      addLog(`Scored ${leads.length} leads. Top score: ${leads[0]?.lead_score}`);
+      addLog(`Qualified leads: ${leads.length}. Top score: ${leads[0]?.lead_score || 0}`);
       setProgress(75);
 
       // --- Step 4: Upsert to Supabase ---
@@ -415,10 +429,11 @@ function DataFetchPanel({ onDone }) {
       {open && (
         <div className="px-4 pb-4 border-t border-gray-100 pt-3 space-y-3">
           <p className="text-xs text-gray-500">
-            Pulls Houston permit records from the city's CKAN API.
-            Filters for commercial-relevant permits (stop work orders, code violations, failed inspections,
-            tenant improvements, renovations) from the last 12 months.
-            Groups by address, scores by severity, frequency, and recency, then uploads to Supabase.
+            Pulls Houston permit records (last 12 months) from the city's CKAN API.
+            Filters out routine single-permit addresses — only keeps properties with
+            <strong> $5K+ in total fees</strong> or <strong>3+ permits</strong>,
+            which signals real construction/renovation activity.
+            Scores by project size, permit frequency, and recency.
           </p>
 
           <button
@@ -547,7 +562,7 @@ export default function CommercialLeads({ onBack, onLogout }) {
     });
 
   const exportCsv = () => {
-    const headers = ["property_address","owner_name","owner_mail_address","year_built","appraised_value","property_type","lead_score","permit_flag","permit_type","permit_status","out_of_state_owner","status","notes","acct_number"];
+    const headers = ["property_address","owner_name","permit_date","appraised_value","property_type","lead_score","permit_type","permit_status","status","notes","acct_number"];
     const rows = filteredLeads.map((l) =>
       headers.map((h) => {
         const v = l[h];
@@ -612,7 +627,7 @@ export default function CommercialLeads({ onBack, onLogout }) {
             <h1 className="text-xl font-bold text-gray-900">
               Commercial Leads
             </h1>
-            <p className="text-xs text-gray-500">Hotels &middot; Tenant Improvements &middot; Code Violations</p>
+            <p className="text-xs text-gray-500">Active Permits &middot; Code Violations &middot; Construction Activity</p>
           </div>
           <div className="flex items-center gap-4">
             <span className="text-xs text-gray-400">
@@ -826,22 +841,17 @@ export default function CommercialLeads({ onBack, onLogout }) {
                       <td className="px-3 py-2 text-sm text-gray-900 max-w-[220px] truncate" title={lead.property_address}>
                         {lead.property_address}
                       </td>
-                      <td className="px-3 py-2 text-sm text-gray-600 max-w-[180px] truncate" title={lead.owner_name}>
-                        {lead.owner_name}
+                      <td className="px-3 py-2 text-sm text-gray-600 max-w-[160px] truncate" title={lead.owner_name}>
+                        {lead.owner_name || <span className="text-gray-300">--</span>}
                       </td>
-                      <td className="px-3 py-2 text-xs text-gray-500 max-w-[180px] truncate" title={lead.owner_mail_address}>
-                        {lead.owner_mail_address || <span className="text-gray-300">--</span>}
+                      <td className="px-3 py-2 text-sm text-gray-600 whitespace-nowrap">
+                        {lead.permit_date || <span className="text-gray-300">--</span>}
                       </td>
-                      <td className="px-3 py-2 text-sm text-gray-600">{lead.year_built}</td>
                       <td className="px-3 py-2 text-sm text-gray-600">{formatCurrency(lead.appraised_value)}</td>
                       <td className="px-3 py-2"><PropertyTypeBadge type={lead.property_type} /></td>
                       <td className="px-3 py-2"><ScoreBadge score={lead.lead_score} /></td>
-                      <td className="px-3 py-2 text-sm">
-                        {lead.permit_flag ? (
-                          <span className="text-orange-600 font-medium text-xs">{lead.permit_status || "Yes"}</span>
-                        ) : (
-                          <span className="text-gray-400">--</span>
-                        )}
+                      <td className="px-3 py-2 text-xs text-gray-600 max-w-[200px] truncate" title={lead.permit_type}>
+                        {lead.permit_type || <span className="text-gray-300">--</span>}
                       </td>
                       <td className="px-3 py-2">
                         <select
