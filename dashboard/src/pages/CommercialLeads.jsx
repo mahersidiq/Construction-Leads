@@ -280,9 +280,12 @@ function DataFetchPanel({ onDone }) {
       setProgress(40);
 
       if (filtered.length === 0) {
-        setStatus("No F1 commercial/hotel properties found. The HCAD dataset columns may have changed — check the browser console.");
-        addLog(`Available columns in first record: ${Object.keys(sample).join(", ")}`);
-        console.log("HCAD sample record:", sample);
+        setStatus("No F1 commercial/hotel properties found. This dataset may not be HCAD property data — see the log below and check the browser console for the full sample record.");
+        const allKeys = Object.keys(sample);
+        addLog(`ALL columns (${allKeys.length}): ${allKeys.join(", ")}`);
+        addLog(`First record (JSON): ${JSON.stringify(sample).slice(0, 800)}...`);
+        console.log("Full sample record:", sample);
+        console.log("All columns:", allKeys);
         setRunning(false);
         return;
       }
