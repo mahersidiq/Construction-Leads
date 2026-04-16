@@ -76,6 +76,183 @@ function StatCard({ label, value, color }) {
   );
 }
 
+function parseCsvLine(line) {
+  const values = [];
+  let current = "";
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inQuotes) {
+      if (ch === '"' && line[i + 1] === '"') {
+        current += '"';
+        i++;
+      } else if (ch === '"') {
+        inQuotes = false;
+      } else {
+        current += ch;
+      }
+    } else if (ch === '"') {
+      inQuotes = true;
+    } else if (ch === ",") {
+      values.push(current);
+      current = "";
+    } else {
+      current += ch;
+    }
+  }
+  values.push(current);
+  return values;
+}
+
+const COMMERCIAL_FIELDS = [
+  "acct_number", "property_address", "owner_name", "owner_mail_address",
+  "year_built", "appraised_value", "property_type", "out_of_state_owner",
+  "permit_flag", "permit_type", "permit_status", "permit_date", "lead_score",
+];
+
+function CsvUploadPanel({ onDone }) {
+  const [open, setOpen] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [status, setStatus] = useState("");
+  const [progress, setProgress] = useState(0);
+
+  const handleFile = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file || !supabaseConfigured) return;
+
+    setUploading(true);
+    setStatus("Reading CSV...");
+    setProgress(10);
+
+    try {
+      const text = await file.text();
+      const lines = text.split("\n").filter((l) => l.trim());
+      if (lines.length < 2) {
+        setStatus("Error: CSV has no data rows.");
+        setUploading(false);
+        return;
+      }
+
+      const headers = parseCsvLine(lines[0]).map((h) => h.trim().toLowerCase());
+      const acctIdx = headers.indexOf("acct_number");
+      if (acctIdx === -1) {
+        setStatus("Error: CSV must have an 'acct_number' column.");
+        setUploading(false);
+        return;
+      }
+
+      setStatus(`Parsing ${lines.length - 1} rows...`);
+      setProgress(25);
+
+      const rows = [];
+      for (let i = 1; i < lines.length; i++) {
+        const vals = parseCsvLine(lines[i]);
+        const row = {};
+        for (const field of COMMERCIAL_FIELDS) {
+          const idx = headers.indexOf(field);
+          if (idx === -1 || idx >= vals.length) continue;
+          const raw = vals[idx].trim();
+          if (!raw) continue;
+
+          if (field === "year_built" || field === "lead_score") {
+            const n = parseInt(raw);
+            if (!isNaN(n)) row[field] = n;
+          } else if (field === "appraised_value") {
+            const n = parseFloat(raw);
+            if (!isNaN(n)) row[field] = n;
+          } else if (field === "out_of_state_owner" || field === "permit_flag") {
+            row[field] = raw.toLowerCase() === "true" || raw === "1";
+          } else {
+            row[field] = raw;
+          }
+        }
+        if (row.acct_number) rows.push(row);
+      }
+
+      if (rows.length === 0) {
+        setStatus("Error: No valid rows found.");
+        setUploading(false);
+        return;
+      }
+
+      setStatus(`Uploading ${rows.length} commercial leads...`);
+      setProgress(50);
+
+      const batchSize = 500;
+      let uploaded = 0;
+      for (let i = 0; i < rows.length; i += batchSize) {
+        const batch = rows.slice(i, i + batchSize);
+        const { error } = await supabase
+          .from("commercial_leads")
+          .upsert(batch, { onConflict: "acct_number" });
+        if (error) {
+          setStatus(`Error at row ${i}: ${error.message}`);
+          setUploading(false);
+          return;
+        }
+        uploaded += batch.length;
+        setProgress(50 + Math.round((uploaded / rows.length) * 50));
+        setStatus(`Uploaded ${uploaded}/${rows.length}...`);
+      }
+
+      setStatus(`Done! ${uploaded} commercial leads uploaded.`);
+      setProgress(100);
+      setUploading(false);
+      if (onDone) onDone();
+    } catch (err) {
+      setStatus(`Error: ${err.message}`);
+      setUploading(false);
+    }
+  };
+
+  return (
+    <div className="bg-white rounded-lg shadow border border-gray-200">
+      <button
+        onClick={() => setOpen(!open)}
+        className="w-full px-4 py-3 flex justify-between items-center text-left hover:bg-gray-50"
+      >
+        <div>
+          <span className="font-medium text-gray-900">Upload Commercial Leads</span>
+          <span className="text-xs text-gray-500 ml-2">Import a CSV with scored commercial lead data</span>
+        </div>
+        <span className="text-gray-400">{open ? "\u25B2" : "\u25BC"}</span>
+      </button>
+
+      {open && (
+        <div className="px-4 pb-4 border-t border-gray-100 pt-3 space-y-3">
+          <p className="text-xs text-gray-500">
+            Upload <code className="bg-gray-100 px-1 rounded">scored_commercial_leads.csv</code> from the Python pipeline,
+            or any CSV with an <code className="bg-gray-100 px-1 rounded">acct_number</code> column.
+            Recognized columns: acct_number, property_address, owner_name, owner_mail_address,
+            year_built, appraised_value, property_type, out_of_state_owner, permit_flag,
+            permit_type, permit_status, permit_date, lead_score.
+          </p>
+          <input
+            type="file"
+            accept=".csv"
+            onChange={handleFile}
+            disabled={uploading}
+            className="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
+          />
+          {(uploading || progress > 0) && (
+            <div className="w-full bg-gray-200 rounded-full h-2">
+              <div
+                className="bg-blue-600 h-2 rounded-full transition-all"
+                style={{ width: `${progress}%` }}
+              />
+            </div>
+          )}
+          {status && (
+            <p className={`text-sm ${status.startsWith("Error") ? "text-red-600" : status.startsWith("Done") ? "text-green-600" : "text-gray-600"}`}>
+              {status}
+            </p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function CommercialLeads({ onBack, onLogout }) {
   const [allLeads, setAllLeads] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -269,6 +446,8 @@ export default function CommercialLeads({ onBack, onLogout }) {
           <StatCard label="Contacted" value={contacted} color="text-purple-600" />
           <StatCard label="Won" value={won} color="text-green-600" />
         </div>
+
+        <CsvUploadPanel onDone={fetchLeads} />
 
         {/* Filter Bar */}
         <div className="bg-white rounded-lg shadow border border-gray-200 p-4">
