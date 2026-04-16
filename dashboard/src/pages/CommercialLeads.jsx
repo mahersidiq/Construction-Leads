@@ -36,13 +36,12 @@ const DEFAULT_FILTERS = {
 
 const COLUMNS = [
   { key: "property_address", label: "Address" },
-  { key: "owner_name", label: "Owner" },
-  { key: "owner_mail_address", label: "Mail Address" },
-  { key: "year_built", label: "Year" },
-  { key: "appraised_value", label: "Value" },
-  { key: "property_type", label: "Type" },
+  { key: "owner_name", label: "Applicant" },
+  { key: "permit_date", label: "Permit Date" },
+  { key: "appraised_value", label: "Fees" },
+  { key: "property_type", label: "Priority" },
   { key: "lead_score", label: "Score" },
-  { key: "permit_flag", label: "Permit" },
+  { key: "permit_type", label: "Permits" },
 ];
 
 function SortArrow({ col, sortCol, sortAsc }) {
@@ -547,7 +546,7 @@ export default function CommercialLeads({ onBack, onLogout }) {
     });
 
   const exportCsv = () => {
-    const headers = ["property_address","owner_name","owner_mail_address","year_built","appraised_value","property_type","lead_score","permit_flag","permit_type","permit_status","out_of_state_owner","status","notes","acct_number"];
+    const headers = ["property_address","owner_name","permit_date","appraised_value","property_type","lead_score","permit_type","permit_status","status","notes","acct_number"];
     const rows = filteredLeads.map((l) =>
       headers.map((h) => {
         const v = l[h];
@@ -612,7 +611,7 @@ export default function CommercialLeads({ onBack, onLogout }) {
             <h1 className="text-xl font-bold text-gray-900">
               Commercial Leads
             </h1>
-            <p className="text-xs text-gray-500">Hotels &middot; Tenant Improvements &middot; Code Violations</p>
+            <p className="text-xs text-gray-500">Active Permits &middot; Code Violations &middot; Construction Activity</p>
           </div>
           <div className="flex items-center gap-4">
             <span className="text-xs text-gray-400">
@@ -826,22 +825,17 @@ export default function CommercialLeads({ onBack, onLogout }) {
                       <td className="px-3 py-2 text-sm text-gray-900 max-w-[220px] truncate" title={lead.property_address}>
                         {lead.property_address}
                       </td>
-                      <td className="px-3 py-2 text-sm text-gray-600 max-w-[180px] truncate" title={lead.owner_name}>
-                        {lead.owner_name}
+                      <td className="px-3 py-2 text-sm text-gray-600 max-w-[160px] truncate" title={lead.owner_name}>
+                        {lead.owner_name || <span className="text-gray-300">--</span>}
                       </td>
-                      <td className="px-3 py-2 text-xs text-gray-500 max-w-[180px] truncate" title={lead.owner_mail_address}>
-                        {lead.owner_mail_address || <span className="text-gray-300">--</span>}
+                      <td className="px-3 py-2 text-sm text-gray-600 whitespace-nowrap">
+                        {lead.permit_date || <span className="text-gray-300">--</span>}
                       </td>
-                      <td className="px-3 py-2 text-sm text-gray-600">{lead.year_built}</td>
                       <td className="px-3 py-2 text-sm text-gray-600">{formatCurrency(lead.appraised_value)}</td>
                       <td className="px-3 py-2"><PropertyTypeBadge type={lead.property_type} /></td>
                       <td className="px-3 py-2"><ScoreBadge score={lead.lead_score} /></td>
-                      <td className="px-3 py-2 text-sm">
-                        {lead.permit_flag ? (
-                          <span className="text-orange-600 font-medium text-xs">{lead.permit_status || "Yes"}</span>
-                        ) : (
-                          <span className="text-gray-400">--</span>
-                        )}
+                      <td className="px-3 py-2 text-xs text-gray-600 max-w-[200px] truncate" title={lead.permit_type}>
+                        {lead.permit_type || <span className="text-gray-300">--</span>}
                       </td>
                       <td className="px-3 py-2">
                         <select
