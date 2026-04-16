@@ -84,32 +84,7 @@ const CKAN_URL = "https://data.houstontx.gov/api/3/action/datastore_search";
 const PERMIT_RESOURCE_ID = "80b03984-0e31-41ff-937b-35b686755bf9";
 const CKAN_PAGE_SIZE = 32000;
 
-// Only keep permits from the last N days
 const RECENT_DAYS = 365;
-
-// Permit types that signal commercial construction opportunity
-const COMMERCIAL_PERMIT_PATTERNS = [
-  [/STOP\s*WORK/i, "Stop Work Order"],
-  [/FAILED\s*INSPECTION/i, "Failed Inspection"],
-  [/CODE\s*VIOLATION/i, "Code Violation"],
-  [/CONDEMNED/i, "Condemned"],
-  [/UNSAFE/i, "Unsafe Structure"],
-  [/TENANT\s*IMPROVEMENT/i, "Tenant Improvement"],
-  [/\bTI\b/, "Tenant Improvement"],
-  [/CHANGE\s*OF\s*OCCUPANCY/i, "Change of Occupancy"],
-  [/CHANGE\s*OF\s*USE/i, "Change of Use"],
-  [/CERTIFICATE\s*OF\s*OCCUPANCY/i, "Certificate of Occupancy"],
-  [/COMMERCIAL/i, "Commercial"],
-  [/RENOVATION/i, "Renovation"],
-  [/REMODEL/i, "Remodel"],
-  [/ALTERATION/i, "Alteration"],
-  [/REPAIR/i, "Repair"],
-];
-
-const HIGH_SEVERITY = new Set([
-  "Stop Work Order", "Failed Inspection", "Code Violation",
-  "Condemned", "Unsafe Structure",
-]);
 
 function findCol(record, candidates) {
   for (const c of candidates) {
@@ -138,21 +113,16 @@ function normalizeAddr(raw) {
   return addr.replace(/\s+/g, " ").trim();
 }
 
-function classifyPermit(text) {
-  if (!text) return null;
-  const str = String(text);
-  for (const [pattern, label] of COMMERCIAL_PERMIT_PATTERNS) {
-    if (pattern.test(str)) return label;
-  }
-  return null;
-}
-
 function scorePermitLead(lead) {
   let s = 0;
-  // Severity of worst permit type
-  if (HIGH_SEVERITY.has(lead._worst_type)) s += 25;
-  else s += 10;
-  // Multiple permits at same address = more activity
+  // Total fees = project size signal
+  const fees = lead._total_fees || 0;
+  if (fees >= 50000) s += 25;
+  else if (fees >= 10000) s += 20;
+  else if (fees >= 2000) s += 15;
+  else if (fees >= 500) s += 10;
+  else s += 5;
+  // Multiple permits at same address = sustained activity
   const count = lead._permit_count || 1;
   if (count >= 5) s += 25;
   else if (count >= 3) s += 20;
@@ -160,9 +130,11 @@ function scorePermitLead(lead) {
   // Recency: permits in last 90 days are hotter
   if (lead._most_recent_days != null && lead._most_recent_days <= 90) s += 20;
   else if (lead._most_recent_days != null && lead._most_recent_days <= 180) s += 10;
-  // Has multiple different permit types = complex situation
-  if (lead._type_count >= 3) s += 15;
-  else if (lead._type_count >= 2) s += 10;
+  // Unit count signal
+  const units = lead._total_units || 0;
+  if (units >= 50) s += 20;
+  else if (units >= 10) s += 15;
+  else if (units >= 2) s += 10;
   return Math.min(s, 100);
 }
 
@@ -228,7 +200,7 @@ function DataFetchPanel({ onDone }) {
         return;
       }
 
-      // Discover columns
+      // Discover columns from actual data
       const sample = permitRaw[0];
       const allKeys = Object.keys(sample);
       addLog(`Columns (${allKeys.length}): ${allKeys.join(", ")}`);
@@ -238,27 +210,34 @@ function DataFetchPanel({ onDone }) {
         "Address", "address", "Project Address", "project_address",
         "Street_Address", "street_address", "SITE_ADDRESS", "Location",
       ]);
-      const typeCol = findCol(sample, [
-        "Permit Type", "permit_type", "Type", "type",
-        "Permit_Type", "Category",
-      ]);
-      const descCol = findCol(sample, [
-        "Description", "description", "Project Description",
-        "permit_description", "work_description", "Scope of Work",
-      ]);
       const dateCol = findCol(sample, [
+        "Receipt Dt", "receipt_dt", "Receipt_Dt",
         "Issue Date", "issue_date", "Issued Date", "issued_date",
         "Date", "date", "permit_date", "Date Issued",
       ]);
-      const statusCol = findCol(sample, [
-        "Status", "status", "Permit Status", "permit_status",
+      const feeCol = findCol(sample, [
+        "Total Collected", "total_collected", "Permit Fee", "permit_fee",
+        "Fee", "Amount",
+      ]);
+      const unitsCol = findCol(sample, [
+        "Units", "units", "Unit Count", "unit_count",
+      ]);
+      const applicantCol = findCol(sample, [
+        "Applicant Name", "applicant_name", "Applicant\nName",
+        "Applicant", "Owner", "owner",
+      ]);
+      const projectCol = findCol(sample, [
+        "Project No", "project_no", "Project_No", "Project Number",
       ]);
       const idCol = findCol(sample, [
-        "Receipt No", "receipt_no", "Permit Number", "permit_number",
-        "Project No", "project_no", "Record ID", "_id",
+        "Receipt No", "receipt_no", "Receipt_No",
+        "Permit Number", "permit_number", "Record ID", "_id",
+      ]);
+      const zipCol = findCol(sample, [
+        "Payee Zip", "payee_zip", "Zip", "zip", "ZIP",
       ]);
 
-      addLog(`Mapped — addr: ${addrCol || "NONE"}, type: ${typeCol || "NONE"}, desc: ${descCol || "NONE"}, date: ${dateCol || "NONE"}, status: ${statusCol || "NONE"}, id: ${idCol || "_id"}`);
+      addLog(`Mapped — addr: ${addrCol || "NONE"}, date: ${dateCol || "NONE"}, fee: ${feeCol || "NONE"}, units: ${unitsCol || "NONE"}, applicant: ${applicantCol || "NONE"}, id: ${idCol || "_id"}`);
 
       if (!addrCol) {
         setStatus("Error: No address column found in permit data.");
@@ -267,28 +246,17 @@ function DataFetchPanel({ onDone }) {
         return;
       }
 
-      // --- Step 2: Filter for commercial-relevant permits, recent only ---
-      setStatus("Filtering for commercial permits (last 12 months)...");
+      // --- Step 2: Filter recent permits and group by address ---
+      setStatus("Filtering recent permits and grouping by address...");
       const cutoff = new Date();
       cutoff.setTime(cutoff.getTime() - RECENT_DAYS * 24 * 60 * 60 * 1000);
 
       const addressMap = new Map();
       let matchedCount = 0;
       let skippedOld = 0;
-      let skippedType = 0;
+      let skippedNoAddr = 0;
 
       for (const rec of permitRaw) {
-        // Classify permit type from type + description columns
-        const typeText = [typeCol, descCol, statusCol]
-          .filter(Boolean)
-          .map((c) => String(rec[c] || ""))
-          .join(" ");
-        const category = classifyPermit(typeText);
-        if (!category) {
-          skippedType++;
-          continue;
-        }
-
         // Recency filter
         if (dateCol) {
           const d = new Date(rec[dateCol]);
@@ -299,43 +267,55 @@ function DataFetchPanel({ onDone }) {
         }
 
         const rawAddr = String(rec[addrCol] || "").trim();
-        if (!rawAddr) continue;
+        if (!rawAddr) {
+          skippedNoAddr++;
+          continue;
+        }
         matchedCount++;
 
         const normAddr = normalizeAddr(rawAddr);
         const permitDate = dateCol && rec[dateCol] ? new Date(rec[dateCol]) : null;
         const permitId = idCol ? String(rec[idCol] || "") : "";
+        const fee = feeCol ? parseFloat(rec[feeCol]) || 0 : 0;
+        const units = unitsCol ? parseInt(rec[unitsCol]) || 0 : 0;
+        const applicant = applicantCol ? String(rec[applicantCol] || "").trim() : "";
+        const project = projectCol ? String(rec[projectCol] || "").trim() : "";
+        const zip = zipCol ? String(rec[zipCol] || "").trim() : "";
 
         const existing = addressMap.get(normAddr);
         if (existing) {
           existing.count++;
-          existing.types.add(category);
-          if (HIGH_SEVERITY.has(category) && !HIGH_SEVERITY.has(existing.worst_type)) {
-            existing.worst_type = category;
-          }
+          existing.total_fees += fee;
+          existing.total_units = Math.max(existing.total_units, units);
           if (permitDate && (!existing.most_recent || permitDate > existing.most_recent)) {
             existing.most_recent = permitDate;
           }
           if (permitId) existing.ids.push(permitId);
+          if (applicant && !existing.applicant) existing.applicant = applicant;
+          if (project && !existing.project) existing.project = project;
         } else {
           addressMap.set(normAddr, {
             raw_address: rawAddr,
             count: 1,
-            types: new Set([category]),
-            worst_type: category,
+            total_fees: fee,
+            total_units: units,
             most_recent: permitDate,
             ids: permitId ? [permitId] : [],
+            applicant,
+            project,
+            zip,
           });
         }
       }
 
-      addLog(`Commercial permits (last ${RECENT_DAYS} days): ${matchedCount.toLocaleString()}`);
-      addLog(`Skipped: ${skippedType.toLocaleString()} non-commercial, ${skippedOld.toLocaleString()} older than cutoff`);
+      addLog(`Recent permits (last ${RECENT_DAYS} days): ${matchedCount.toLocaleString()}`);
+      addLog(`Skipped: ${skippedOld.toLocaleString()} older, ${skippedNoAddr.toLocaleString()} no address`);
       addLog(`Unique addresses: ${addressMap.size.toLocaleString()}`);
       setProgress(65);
 
       if (addressMap.size === 0) {
-        setStatus("No recent commercial permits found. Try adjusting the recency filter.");
+        setStatus("No recent permits found. The date column may not be matching — check the log.");
+        addLog(`First record: ${JSON.stringify(sample).slice(0, 800)}`);
         setRunning(false);
         return;
       }
@@ -349,26 +329,25 @@ function DataFetchPanel({ onDone }) {
         const daysSince = data.most_recent
           ? Math.round((now - data.most_recent) / (1000 * 60 * 60 * 24))
           : null;
-        const typesArr = [...data.types];
-        const isHighPriority = typesArr.some((t) => HIGH_SEVERITY.has(t));
+        const isHighValue = data.total_fees >= 10000 || data.count >= 3;
 
         const lead = {
           acct_number: data.ids[0] || normAddr.replace(/\s+/g, "-").slice(0, 50),
           property_address: data.raw_address,
-          owner_name: "",
-          owner_mail_address: "",
+          owner_name: data.applicant || "",
+          owner_mail_address: data.zip ? `Houston, TX ${data.zip}` : "",
           year_built: null,
-          appraised_value: null,
-          property_type: isHighPriority ? "high-priority" : "violation",
+          appraised_value: data.total_fees > 0 ? data.total_fees : null,
+          property_type: isHighValue ? "high-priority" : "violation",
           out_of_state_owner: false,
           permit_flag: true,
-          permit_type: typesArr.join(", "),
-          permit_status: data.worst_type,
+          permit_type: `${data.count} permit(s), $${data.total_fees.toLocaleString()} fees`,
+          permit_status: data.project || `${data.count} permits`,
           permit_date: data.most_recent ? data.most_recent.toISOString().slice(0, 10) : null,
-          _worst_type: data.worst_type,
+          _total_fees: data.total_fees,
           _permit_count: data.count,
           _most_recent_days: daysSince,
-          _type_count: typesArr.length,
+          _total_units: data.total_units,
         };
         lead.lead_score = scorePermitLead(lead);
         leads.push(lead);
@@ -376,10 +355,10 @@ function DataFetchPanel({ onDone }) {
 
       // Clean internal fields
       for (const lead of leads) {
-        delete lead._worst_type;
+        delete lead._total_fees;
         delete lead._permit_count;
         delete lead._most_recent_days;
-        delete lead._type_count;
+        delete lead._total_units;
       }
 
       leads.sort((a, b) => b.lead_score - a.lead_score);
