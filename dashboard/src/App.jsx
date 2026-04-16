@@ -2,6 +2,7 @@ import { useState, Component } from "react";
 import Login from "./pages/Login";
 import Dashboard from "./pages/Dashboard";
 import Upload from "./pages/Upload";
+import CommercialLeads from "./pages/CommercialLeads";
 
 class ErrorBoundary extends Component {
   constructor(props) {
@@ -55,6 +56,17 @@ export default function App() {
     return <Login onLogin={handleLogin} />;
   }
 
+  if (page === "commercial") {
+    return (
+      <ErrorBoundary>
+        <CommercialLeads
+          onBack={() => setPage("dashboard")}
+          onLogout={handleLogout}
+        />
+      </ErrorBoundary>
+    );
+  }
+
   if (page === "upload") {
     return (
       <ErrorBoundary>
@@ -83,6 +95,22 @@ export default function App() {
 
   return (
     <ErrorBoundary>
+      <div className="bg-blue-900 text-white">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-2 flex items-center gap-4">
+          <span className="text-xs font-medium opacity-75">Modules:</span>
+          <button
+            className="text-xs font-semibold border-b-2 border-white pb-0.5"
+          >
+            Multifamily
+          </button>
+          <button
+            onClick={() => setPage("commercial")}
+            className="text-xs font-medium opacity-75 hover:opacity-100 transition-opacity"
+          >
+            Commercial Leads
+          </button>
+        </div>
+      </div>
       <Dashboard
         onLogout={handleLogout}
         onUpload={() => setPage("upload")}
