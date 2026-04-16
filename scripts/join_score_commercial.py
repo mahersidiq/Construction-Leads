@@ -85,13 +85,21 @@ def main():
     permits["_status_rank"] = (
         permits["commercial_permit_type"].map(status_priority).fillna(99)
     )
-    permits = permits.sort_values("_status_rank").drop_duplicates(
-        subset=["_norm_addr"], keep="first"
-    )
+    # Prefer most recent permit per address; ties broken by status severity
+    if "permit_date" in permits.columns:
+        permits["_permit_dt"] = pd.to_datetime(permits["permit_date"], errors="coerce")
+        permits = permits.sort_values(
+            ["_permit_dt", "_status_rank"], ascending=[False, True]
+        ).drop_duplicates(subset=["_norm_addr"], keep="first")
+    else:
+        permits["permit_date"] = None
+        permits = permits.sort_values("_status_rank").drop_duplicates(
+            subset=["_norm_addr"], keep="first"
+        )
 
     # Left join: all HCAD properties, enriched with permit data where matched
     merged = hcad.merge(
-        permits[["_norm_addr", "commercial_permit_type"]],
+        permits[["_norm_addr", "commercial_permit_type", "permit_date"]],
         on="_norm_addr",
         how="left",
         suffixes=("", "_permit"),
@@ -124,6 +132,7 @@ def main():
             "permit_flag",
             "permit_type",
             "permit_status",
+            "permit_date",
             "lead_score",
         ]
     ].copy()

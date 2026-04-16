@@ -14,7 +14,7 @@ Pipeline:
 
 import os
 import re
-from datetime import date
+from datetime import date, timedelta
 
 import pandas as pd
 import requests
@@ -35,6 +35,11 @@ OUTPUT_PATH = os.path.join(os.path.dirname(__file__), "permits_commercial.csv")
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY", "")
+
+# Only keep permits issued within the last N days. Code violations and stop
+# work orders are most actionable while fresh — older entries are usually
+# already resolved or the property has changed hands.
+RECENT_PERMIT_DAYS = 365
 
 # Commercial permit type patterns and their category labels
 COMMERCIAL_PERMIT_PATTERNS = [
@@ -148,7 +153,7 @@ def fetch_permits() -> pd.DataFrame:
 def filter_commercial_permits(df: pd.DataFrame) -> pd.DataFrame:
     """Filter permits for commercial-relevant types and add category column."""
     if df.empty:
-        return pd.DataFrame(columns=["address", "address_norm", "commercial_permit_type"])
+        return pd.DataFrame(columns=["address", "address_norm", "commercial_permit_type", "permit_date"])
 
     # Identify type/description columns to search
     type_candidates = [
@@ -160,7 +165,7 @@ def filter_commercial_permits(df: pd.DataFrame) -> pd.DataFrame:
 
     if not type_cols:
         print(f"  WARNING: No type/description column found. Columns: {list(df.columns)}")
-        return pd.DataFrame(columns=["address", "address_norm", "commercial_permit_type"])
+        return pd.DataFrame(columns=["address", "address_norm", "commercial_permit_type", "permit_date"])
 
     # Check each row for matching permit types
     categories = []
@@ -177,7 +182,23 @@ def filter_commercial_permits(df: pd.DataFrame) -> pd.DataFrame:
 
     # Keep only rows that matched a commercial permit type
     filtered = df[df["commercial_permit_type"].notna()].copy()
-    print(f"Commercial permits matched: {len(filtered)}")
+    print(f"Commercial permits matched (any date): {len(filtered)}")
+
+    # Date filter — keep only recent permits so we surface active opportunities
+    date_candidates = [
+        "Issue Date", "issue_date", "Issued Date", "issued_date",
+        "permit_date", "Date Issued", "date_issued",
+    ]
+    date_col = next((c for c in date_candidates if c in filtered.columns), None)
+
+    if date_col:
+        filtered["_permit_dt"] = pd.to_datetime(filtered[date_col], errors="coerce")
+        cutoff = pd.Timestamp(date.today() - timedelta(days=RECENT_PERMIT_DAYS))
+        filtered = filtered[filtered["_permit_dt"] >= cutoff].copy()
+        print(f"After recency filter (last {RECENT_PERMIT_DAYS} days): {len(filtered)}")
+    else:
+        print(f"  WARNING: No date column found — keeping all matched permits.")
+        filtered["_permit_dt"] = pd.NaT
 
     # Identify address column
     addr_col = next(
@@ -188,13 +209,14 @@ def filter_commercial_permits(df: pd.DataFrame) -> pd.DataFrame:
 
     if not addr_col:
         print(f"  WARNING: No address column found. Columns: {list(filtered.columns)}")
-        return pd.DataFrame(columns=["address", "address_norm", "commercial_permit_type"])
+        return pd.DataFrame(columns=["address", "address_norm", "commercial_permit_type", "permit_date"])
 
     out = pd.DataFrame()
     out["address"] = filtered[addr_col].astype(str).str.strip()
     out = out[out["address"].str.len() > 0].copy()
     out["address_norm"] = out["address"].apply(normalize_address)
     out["commercial_permit_type"] = filtered.loc[out.index, "commercial_permit_type"].values
+    out["permit_date"] = filtered.loc[out.index, "_permit_dt"].dt.strftime("%Y-%m-%d").values
 
     # Carry forward useful columns
     for col in ["Receipt No", "Project No", "Applicant\nName"]:
@@ -242,7 +264,7 @@ def fetch_commercial_lead_addresses(client) -> pd.DataFrame:
 def update_matching_commercial_leads(client, matches: list[dict]) -> int:
     """
     Set permit_flag = true for the given commercial lead matches.
-    Each match dict has: id, commercial_permit_type.
+    Each match dict has: id, commercial_permit_type, permit_date.
     Returns the number of rows updated.
     """
     if not matches:
@@ -258,7 +280,7 @@ def update_matching_commercial_leads(client, matches: list[dict]) -> int:
                 "permit_flag": True,
                 "permit_type": m["commercial_permit_type"],
                 "permit_status": m["commercial_permit_type"],
-                "permit_date": str(date.today()),
+                "permit_date": m.get("permit_date") or str(date.today()),
             }).eq("id", m["id"]).execute()
             updated += 1
 
@@ -299,21 +321,22 @@ def main():
         print("\nNo data to match.")
         return
 
-    # Deduplicate permit addresses
-    permit_lookup = permits.drop_duplicates(subset=["address_norm"]).set_index("address_norm")
+    # Deduplicate permit addresses — keep the most recent permit per address
+    permits_sorted = permits.sort_values("permit_date", ascending=False, na_position="last")
+    permit_lookup = permits_sorted.drop_duplicates(subset=["address_norm"]).set_index("address_norm")
 
     # Find matching leads
     matched = leads[leads["address_norm"].isin(permit_lookup.index)].copy()
 
     print(f"\n{'=' * 40}")
-    print(f"Matched {len(matched)} commercial leads to permits")
+    print(f"Matched {len(matched)} commercial leads to recent permits")
     print(f"{'=' * 40}")
 
     if matched.empty:
         print("No matches found.")
         return
 
-    # Build match list with permit type info
+    # Build match list with permit type and date info
     match_list = []
     for _, row in matched.iterrows():
         permit_row = permit_lookup.loc[row["address_norm"]]
@@ -322,6 +345,7 @@ def main():
         match_list.append({
             "id": row["id"],
             "commercial_permit_type": permit_row["commercial_permit_type"],
+            "permit_date": permit_row.get("permit_date"),
         })
 
     # --- Step 3: Update Supabase ---
